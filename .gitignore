@@ -1,3 +1,12 @@
+# targets object store
+_targets/
+
+# Cached rasters — large, reconstructible from CACHE_DIR config
+data/processed/cache/
+
+# Final outputs — results, not source
+data/processed/catchments/
+
 # History files
 .Rhistory
 .Rapp.history
