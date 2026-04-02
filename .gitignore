@@ -4,8 +4,10 @@ _targets/
 # Cached rasters — large, reconstructible from CACHE_DIR config
 data/processed/cache/
 
-# Final outputs — results, not source
-data/processed/catchments/
+# Data, output, and testing directories
+/data/
+/output/
+/testing/
 
 # History files
 .Rhistory
