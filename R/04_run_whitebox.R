@@ -24,6 +24,7 @@
 #   flow_pointer.tif  : D8 flow direction raster
 #   flow_accum.tif    : D8 flow accumulation raster
 #   streams.tif       : Binary stream network raster (1 = stream cell)
+#   hillshade.tif     : Hillshade derived from breached DEM
 #
 # Dependencies: whitebox, fs, purrr, glue, cli (via utils.R)
 # ---------------------------------------------------------------------------
@@ -67,10 +68,11 @@ run_whitebox <- function(
     burn_streams <- group_manifest$burn_streams[i]
 
     # Define output paths
-    breached_path <- fs::path(grp_cache, "dem_breached.tif")
-    pointer_path  <- fs::path(grp_cache, "flow_pointer.tif")
-    accum_path    <- fs::path(grp_cache, "flow_accum.tif")
-    streams_path  <- fs::path(grp_cache, "streams.tif")
+    breached_path   <- fs::path(grp_cache, "dem_breached.tif")
+    pointer_path    <- fs::path(grp_cache, "flow_pointer.tif")
+    accum_path      <- fs::path(grp_cache, "flow_accum.tif")
+    streams_path    <- fs::path(grp_cache, "streams.tif")
+    hillshade_path  <- fs::path(grp_cache, "hillshade.tif")
 
     # Resolve stream threshold: group override if present, else global default.
     # Guard against stream_threshold column being absent from the manifest
@@ -87,10 +89,11 @@ run_whitebox <- function(
     }
 
     # Skip group if all outputs already exist
-    if (cache_exists(breached_path) &&
-        cache_exists(pointer_path)  &&
-        cache_exists(accum_path)    &&
-        cache_exists(streams_path)) {
+    if (cache_exists(breached_path)  &&
+        cache_exists(pointer_path)   &&
+        cache_exists(accum_path)     &&
+        cache_exists(streams_path)   &&
+        cache_exists(hillshade_path)) {
       cw_inform(glue::glue(
         "Group '{grp}': Whitebox outputs found in cache, skipping."
       ))
@@ -135,6 +138,7 @@ run_whitebox <- function(
       pointer_path     = pointer_path,
       accum_path       = accum_path,
       streams_path     = streams_path,
+      hillshade_path   = hillshade_path,
       max_dist         = max_dist,
       flat_increment   = flat_increment,
       fill             = fill,
@@ -156,13 +160,14 @@ run_whitebox <- function(
 #' @param breached_path    Character. Output path for breached DEM
 #' @param pointer_path     Character. Output path for flow pointer
 #' @param accum_path       Character. Output path for flow accumulation
-#' @param streams_path     Character. Output path for streams raster
-#' @param max_dist         Integer. Maximum breach path length in cells
-#' @param flat_increment   Numeric or NULL. Flat area elevation increment
-#' @param fill             Logical. Fill remaining depressions after breaching
+#' @param streams_path    Character. Output path for streams raster
+#' @param hillshade_path  Character. Output path for hillshade raster
+#' @param max_dist        Integer. Maximum breach path length in cells
+#' @param flat_increment  Numeric or NULL. Flat area elevation increment
+#' @param fill            Logical. Fill remaining depressions after breaching
 #' @param stream_threshold Integer. Flow accumulation threshold in cells
 #'
-#' @return Invisibly returns streams_path
+#' @return Invisibly returns hillshade_path
 run_whitebox_group <- function(
     grp,
     input_dem,
@@ -170,6 +175,7 @@ run_whitebox_group <- function(
     pointer_path,
     accum_path,
     streams_path,
+    hillshade_path,
     max_dist,
     flat_increment,
     fill,
@@ -292,7 +298,33 @@ run_whitebox_group <- function(
     cw_inform(glue::glue("Group '{grp}': streams.tif found in cache, skipping."))
   }
 
-  invisible(streams_path)
+  # -- Step 5: Hillshade ---------------------------------------------------
+  if (!cache_exists(hillshade_path)) {
+
+    cw_inform(glue::glue("Group '{grp}': computing hillshade..."))
+
+    # wbt_hillshade() is computed from the breached DEM rather than the raw
+    # DEM so that the shading reflects the hydrologically conditioned surface.
+    # Default azimuth (315°) and altitude (30°) produce natural-looking results.
+    whitebox::wbt_hillshade(
+      dem    = normalizePath(breached_path,   mustWork = TRUE),
+      output = normalizePath(hillshade_path,  mustWork = FALSE)
+    )
+
+    if (!cache_exists(hillshade_path)) {
+      cw_abort(glue::glue(
+        "Group '{grp}': wbt_hillshade() did not produce output at ",
+        "{hillshade_path}. Check WhiteboxTools log above."
+      ))
+    }
+
+    cw_inform(glue::glue("Group '{grp}': hillshade.tif written."))
+
+  } else {
+    cw_inform(glue::glue("Group '{grp}': hillshade.tif found in cache, skipping."))
+  }
+
+  invisible(hillshade_path)
 }
 
 #' Verify Whitebox outputs for all groups
@@ -314,7 +346,8 @@ verify_whitebox_outputs <- function(group_manifest) {
       dem_breached = fs::path(grp_cache, "dem_breached.tif"),
       flow_pointer = fs::path(grp_cache, "flow_pointer.tif"),
       flow_accum   = fs::path(grp_cache, "flow_accum.tif"),
-      streams      = fs::path(grp_cache, "streams.tif")
+      streams      = fs::path(grp_cache, "streams.tif"),
+      hillshade    = fs::path(grp_cache, "hillshade.tif")
     )
 
     purrr::imap(files, function(path, name) {

@@ -35,6 +35,8 @@
 #   flow_pointer.tif      : Flow pointer clipped and masked to catchment
 #   flow_accum.tif        : Flow accumulation clipped and masked to catchment
 #   streams.tif           : Streams raster clipped and masked to catchment
+#   hillshade.tif         : Hillshade clipped and masked to catchment
+#   streams.gpkg          : NHN flowlines clipped to catchment polygon
 #
 # Dependencies: sf, terra, whitebox, dplyr, purrr, fs, cli (via utils.R)
 # ---------------------------------------------------------------------------
@@ -140,7 +142,8 @@ load_group_rasters <- function(grp_cache, grp) {
     dem_breached = fs::path(grp_cache, "dem_breached.tif"),
     flow_pointer = fs::path(grp_cache, "flow_pointer.tif"),
     flow_accum   = fs::path(grp_cache, "flow_accum.tif"),
-    streams      = fs::path(grp_cache, "streams.tif")
+    streams      = fs::path(grp_cache, "streams.tif"),
+    hillshade    = fs::path(grp_cache, "hillshade.tif")
   )
 
   # Verify all required rasters exist before loading
@@ -300,6 +303,14 @@ delineate_site <- function(
       group_rasters = group_rasters,
       site_dir      = site_dir,
       site_id       = sid
+    )
+
+    # -- Step 8: Clip NHN flowlines to catchment ---------------------------
+    clip_flowlines_to_catchment(
+      catchment_sf     = catchment_sf,
+      flowlines_path   = fs::path(grp_cache, "flowlines.gpkg"),
+      site_dir         = site_dir,
+      site_id          = sid
     )
 
     tibble::tibble(
@@ -502,6 +513,85 @@ watershed_to_polygon <- function(watershed_tif, site_dir, site_id) {
   }
 
   catchment_sf
+}
+
+# -- Flowlines clipping ------------------------------------------------------
+
+#' Clip NHN flowlines from group cache to the catchment polygon
+#'
+#' Reads the group-level flowlines.gpkg, clips to the catchment boundary,
+#' and writes the result as streams.gpkg in the site output directory.
+#' If no flowlines intersect the catchment (e.g. ungauged headwater sites),
+#' an empty GeoPackage is written and a warning is issued.
+#'
+#' @param catchment_sf   sf polygon. Catchment boundary in EPSG:3979
+#' @param flowlines_path Character. Path to group flowlines.gpkg
+#' @param site_dir       Character. Site output directory path
+#' @param site_id        Character. Site identifier (for log messages)
+#' @return Invisibly NULL. Called for side effects.
+clip_flowlines_to_catchment <- function(
+    catchment_sf,
+    flowlines_path,
+    site_dir,
+    site_id
+) {
+
+  out_path <- fs::path(site_dir, "streams.gpkg")
+
+  if (cache_exists(out_path)) {
+    cw_inform(glue::glue("Site '{site_id}': streams.gpkg found, skipping."))
+    return(invisible(NULL))
+  }
+
+  # If no flowlines exist at group level (e.g. no NHN coverage), write empty
+  if (!cache_exists(flowlines_path)) {
+    cw_warn(glue::glue(
+      "Site '{site_id}': group flowlines.gpkg not found at {flowlines_path}. ",
+      "Writing empty streams.gpkg."
+    ))
+    sf::st_sf(geometry = sf::st_sfc(crs = 3979)) |>
+      sf::st_write(out_path, delete_dsn = TRUE, quiet = TRUE)
+    return(invisible(NULL))
+  }
+
+  flowlines <- sf::st_read(flowlines_path, quiet = TRUE)
+
+  if (nrow(flowlines) == 0) {
+    cw_warn(glue::glue(
+      "Site '{site_id}': group flowlines.gpkg is empty. ",
+      "Writing empty streams.gpkg."
+    ))
+    sf::st_write(flowlines, out_path, delete_dsn = TRUE, quiet = TRUE)
+    return(invisible(NULL))
+  }
+
+  # Clip flowlines to catchment polygon
+  clipped <- tryCatch(
+    sf::st_intersection(flowlines, sf::st_union(catchment_sf)),
+    error = function(e) {
+      cw_warn(glue::glue(
+        "Site '{site_id}': error clipping flowlines — {e$message}. ",
+        "Writing empty streams.gpkg."
+      ))
+      flowlines[0, ]
+    }
+  )
+
+  # Keep only line geometry types — intersection can return points where
+  # stream lines touch the catchment boundary
+  clipped <- clipped[
+    sf::st_geometry_type(clipped) %in%
+      c("LINESTRING", "MULTILINESTRING"), ,
+    drop = FALSE
+  ]
+
+  sf::st_write(clipped, out_path, delete_dsn = TRUE, quiet = TRUE)
+
+  cw_inform(glue::glue(
+    "Site '{site_id}': streams.gpkg written ({nrow(clipped)} features)."
+  ))
+
+  invisible(NULL)
 }
 
 # -- Raster clipping ---------------------------------------------------------
