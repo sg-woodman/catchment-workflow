@@ -1,0 +1,480 @@
+# Manaul delineation
+library(here)
+library(tidyterra)
+
+## Set up sites
+man_sites <- tribble(
+  # -------------------------------------------------------------------------
+  # Column names — do not modify
+  ~site_id  , ~lat        , ~lon          , ~group   ,
+  "BNWT1"   , 67.85839    , -133.66695    , "Inuvik" ,
+
+  "CW-S-07" , 68.08668    , -133.49118    , "Inuvik" ,
+
+  "PHPP05"  , 52.39034    , -102.17277    , "Sask"   ,
+
+  "HB1"     , 49.088413   ,  -57.901861   , "NFLD"   ,
+
+  "L09"     , 48.30161709 ,  -65.7212379  , "Gaspe"  ,
+
+  "L10"     , 48.28311055 ,  -65.67445472 , "Gaspe"
+) |>
+  st_as_sf(coords = c("lon", "lat"), crs = 4326)
+
+## Create testing directories
+man_sites |>
+  pull(site_id) |>
+  as.list() |>
+  map(~ dir.create(path = paste0(here("testing"), "/", .x)))
+
+## Create sample site points
+man_sites |>
+  group_split(site_id) |>
+  map(~ st_transform(.x, "EPSG:3979")) |>
+  walk(
+    ~ st_write(
+      .x,
+      paste0(here("testing"), "/", .x$site_id, "/", .x$site_id, "_coord.shp"),
+      delete_dsn = TRUE
+    )
+  )
+
+group_aoi <- vect(here("cache/group_aois.gpkg"))
+plot(group_aoi)
+
+## Separate out group aoi (based on level 6 hydrobasins)
+inuvik <- group_aoi |>
+  filter(group_id == "Inuvik")
+sask <- group_aoi |>
+  filter(group_id == "Sask")
+gaspe <- group_aoi |>
+  filter(group_id == "Gaspe")
+nfld <- group_aoi |>
+  filter(group_id == "NFLD")
+
+# load dem
+mrdem <- rast("/Users/sam/Documents/cfs/shared_data/raw/dem/mrdem-30-dtm.vrt")
+## Crop and save raw dem in testing folder for each site
+inuvik_dem <- crop(
+  mrdem,
+  inuvik
+) |>
+  mask(inuvik)
+
+plot(inuvik_dem)
+writeRaster(inuvik_dem, here("testing/BNWT1/dem.tif"), overwrite = T)
+writeRaster(inuvik_dem, here("testing/CW-S-07/dem.tif"), overwrite = T)
+
+sask_dem <- crop(
+  mrdem,
+  sask
+) |>
+  mask(sask)
+plot(sask_dem)
+writeRaster(sask_dem, here("testing/PHPP05/dem.tif"), overwrite = T)
+
+gaspe_dem <- crop(
+  mrdem,
+  gaspe
+) |>
+  mask(gaspe)
+writeRaster(gaspe_dem, here("testing/L09/dem.tif"), overwrite = T)
+writeRaster(gaspe_dem, here("testing/L10/dem.tif"), overwrite = T)
+
+nfld_dem <- crop(
+  mrdem,
+  nfld
+) |>
+  mask(nfld)
+plot(nfld_dem)
+writeRaster(nfld_dem, here("testing/HB1/dem.tif"), overwrite = T)
+
+
+nhn <- vect(
+  "/Users/sam/Documents/cfs/shared_data/raw/hydro/networks/NHN/NHN_INDEX_WORKUNIT_LIMIT_2/NHN_INDEX_22_INDEX_WORKUNIT_LIMIT_2.shp"
+)
+
+get_nhn_ids <- function(t1, t2) {
+  # reproject to match - note I get the crs from t2 to guarantee this
+  t1 = terra::project(t1, crs(t2))
+
+  # generate all pairs of intersects
+  int12 = relate(t1, t2, "intersects", pairs = TRUE)
+
+  # combine rows from t1 with rows from t2
+  t12 = cbind(t1[int12[, 1], ], t2[int12[, 2], , drop = TRUE])
+
+  return(t12)
+}
+
+inuvik_nhn <- get_nhn_ids(nhn, inuvik)
+
+sask_nhn <- get_nhn_ids(nhn, sask)
+
+inuvik_nhn |>
+  pull(DATASETNAM)
+sask_nhn |>
+  pull(DATASETNAM)
+
+inuvik_nhn_1001000 <- vect(
+  "/Users/sam/Documents/cfs/shared_data/raw/hydro/networks/NHN/gdb/nhn_rhn_1001000_gdb_en/NHN_1001000_3_0.gdb",
+  layer = "NHN_HN_PrimaryDirectedNLFlow_1"
+)
+
+inuvik_nhn_10la000 <- vect(
+  "/Users/sam/Documents/cfs/shared_data/raw/hydro/networks/NHN/gdb/nhn_rhn_10la000_gdb_en/NHN_10LA000_4_0.gdb",
+  layer = "NHN_HN_PrimaryDirectedNLFlow_1"
+)
+
+inuvik_nhn_10LB000 <- vect(
+  "/Users/sam/Documents/cfs/shared_data/raw/hydro/networks/NHN/gdb/nhn_rhn_10lb000_gdb_en/NHN_10LB000_3_1.gdb",
+  layer = "NHN_HN_PrimaryDirectedNLFlow_1"
+)
+
+inuvik_nhn_10LC000 <- vect(
+  "/Users/sam/Documents/cfs/shared_data/raw/hydro/networks/NHN/gdb/nhn_rhn_10lc000_gdb_en/NHN_10LC000_4_1.gdb",
+  layer = "NHN_HN_PrimaryDirectedNLFlow_1"
+)
+
+inuvik_nhn_10MC002 <- vect(
+  "/Users/sam/Documents/cfs/shared_data/raw/hydro/networks/NHN/gdb/nhn_rhn_10mc002_gdb_en/NHN_10MC002_2_0.gdb",
+  layer = "NHN_HN_PrimaryDirectedNLFlow_1"
+)
+
+inuvik_nhn_10ND000 <- vect(
+  "/Users/sam/Documents/cfs/shared_data/raw/hydro/networks/NHN/gdb/nhn_rhn_10nd000_gdb_en/NHN_10ND000_2_1.gdb",
+  layer = "NHN_HN_PrimaryDirectedNLFlow_1"
+)
+
+
+sask_nhn_05L0001 <- vect(
+  "/Users/sam/Documents/cfs/shared_data/raw/hydro/networks/NHN/gdb/nhn_rhn_05l0001_gdb_en/NHN_05L0001_1_0.gdb",
+  layer = "NHN_HN_PrimaryDirectedNLFlow_1"
+)
+sask_nhn_05LB000 <- vect(
+  "/Users/sam/Documents/cfs/shared_data/raw/hydro/networks/NHN/gdb/nhn_rhn_05lb000_gdb_en/NHN_05LB000_3_0.gdb",
+  layer = "NHN_HN_PrimaryDirectedNLFlow_1"
+)
+sask_nhn_05LC000 <- vect(
+  "/Users/sam/Documents/cfs/shared_data/raw/hydro/networks/NHN/gdb/nhn_rhn_05lc000_gdb_en/nhn_rhn_05lc000.gdb",
+  layer = "NHN_HN_PrimaryDirectedNLFlow_1"
+)
+sask_nhn_05LE000 <- vect(
+  "/Users/sam/Documents/cfs/shared_data/raw/hydro/networks/NHN/gdb/nhn_rhn_05le000_gdb_en/NHN_05LE000_3_0.gdb",
+  layer = "NHN_HN_PrimaryDirectedNLFlow_1"
+)
+sask_nhn_05LF001 <- vect(
+  "/Users/sam/Documents/cfs/shared_data/raw/hydro/networks/NHN/gdb/nhn_rhn_05lf001_gdb_en/nhn_rhn_05lf001.gdb",
+  layer = "NHN_HN_PrimaryDirectedNLFlow_1"
+)
+sask_nhn_05LF002 <- vect(
+  "/Users/sam/Documents/cfs/shared_data/raw/hydro/networks/NHN/gdb/nhn_rhn_05lf002_gdb_en/nhn_rhn_05lf002.gdb",
+  layer = "NHN_HN_PrimaryDirectedNLFlow_1"
+)
+sask_nhn_05LG001 <- vect(
+  "/Users/sam/Documents/cfs/shared_data/raw/hydro/networks/NHN/gdb/nhn_rhn_05lg001_gdb_en/nhn_rhn_05lg001.gdb",
+  layer = "NHN_HN_PrimaryDirectedNLFlow_1"
+)
+sask_nhn_05MC000 <- vect(
+  "/Users/sam/Documents/cfs/shared_data/raw/hydro/networks/NHN/gdb/nhn_rhn_05mc000_gdb_en/NHN_05MC000_2_0.gdb",
+  layer = "NHN_HN_PrimaryDirectedNLFlow_1"
+)
+sask_nhn_05MD000 <- vect(
+  "/Users/sam/Documents/cfs/shared_data/raw/hydro/networks/NHN/gdb/nhn_rhn_05md000_gdb_en/nhn_rhn_05md000.gdb",
+  layer = "NHN_HN_PrimaryDirectedNLFlow_1"
+)
+
+
+get_nhn_streams <- function(t1, t2) {
+  # reproject to match - note I get the crs from t2 to guarantee this
+  t1 = terra::project(t1, crs(t2))
+
+  # generate all pairs of intersects
+  int12 = relate(t1, t2, "intersects", pairs = TRUE)
+
+  # combine rows from t1 with rows from t2
+  t12 = cbind(t1[int12[, 1], ], t2[int12[, 2], , drop = TRUE])
+
+  return(t12)
+}
+
+inuvik_ext <- as.polygons(ext(inuvik), crs = crs(inuvik))
+
+nhn_inuvik <- bind_spat_rows(
+  inuvik_nhn_1001000,
+  inuvik_nhn_10la000,
+  inuvik_nhn_10LB000,
+  inuvik_nhn_10LC000,
+  inuvik_nhn_10MC002,
+  inuvik_nhn_10ND000
+)
+
+nhn_sask <- bind_spat_rows(
+  sask_nhn_05L0001,
+  sask_nhn_05LB000,
+  sask_nhn_05LC000,
+  sask_nhn_05LE000,
+  sask_nhn_05LF001,
+  sask_nhn_05LF002,
+  sask_nhn_05LG001,
+  sask_nhn_05MC000,
+  sask_nhn_05MD000
+)
+
+inu_rivs <- get_nhn_streams(nhn_inuvik, inuvik)
+
+sas_rivs <- get_nhn_streams(nhn_sask, sask)
+
+plot(inu_rivs)
+plot(sas_rivs)
+
+writeVector(inu_rivs, here("testing/BNWT1/stream_tmp.shp"), overwrite = T)
+writeVector(sas_rivs, here("testing/PHPP05/stream_tmp.shp"), overwrite = T)
+
+
+wbt_fill_burn(
+  dem = here("testing/PHPP05/dem.tif"),
+  streams = here("testing/PHPP05/stream_tmp.shp"),
+  output = here("testing/PHPP05/dem_burned.tif"),
+  verbose_mode = T
+)
+
+wbt_breach_depressions_least_cost(
+  dem = here("testing/PHPP05/dem_burned.tif"),
+  output = here("testing/PHPP05/dem_breached.tif"),
+  dist = 10,
+  fill = FALSE
+)
+
+wbt_hillshade(
+  dem = here("testing/PHPP05/dem_breached.tif"),
+  output = here("testing/PHPP05/hillshade.tif")
+)
+
+
+wbt_d8_pointer(
+  dem = here("testing/PHPP05/dem_breached.tif"),
+  output = here("testing/PHPP05/flow_pointer.tif")
+)
+
+
+wbt_d8_flow_accumulation(
+  input = here("testing/PHPP05/flow_pointer.tif"),
+  output = here("testing/PHPP05/flow_accum.tif"),
+  out_type = "cells", # Number of upstream cells
+  pntr = TRUE
+)
+
+wbt_extract_streams(
+  flow_accum = here("testing/PHPP05/flow_accum.tif"),
+  output = here("testing/PHPP05/streams.tif"),
+  threshold = 1000
+)
+
+wbt_hillslopes(
+  d8_pntr = here("testing/PHPP05/flow_pointer.tif"),
+  streams = here("testing/PHPP05/streams.tif"),
+  output = here("testing/PHPP05/hillslope.tif")
+)
+
+wbt_jenson_snap_pour_points(
+  pour_pts = here("testing/PHPP05/PHPP05_coord.shp"),
+  streams = here("testing/PHPP05/streams.tif"),
+  output = here("testing/PHPP05/pour_point_snapped.shp"),
+  snap_dist = 200 # map units = meters for EPSG:3979
+)
+
+wbt_watershed(
+  d8_pntr = here("testing/PHPP05/flow_pointer.tif"),
+  pour_pts = here("testing/PHPP05/pour_point_snapped.shp"),
+  output = here("testing/PHPP05/watershed.tif")
+)
+
+
+# 1. Confirm the breached DEM actually exists and is non-empty
+fs::file_exists(here("testing/BNWT1/dem_breached.tif"))
+fs::file_size(here("testing/BNWT1/dem_breached.tif"))
+
+# 2. Check if WhiteboxTools actually ran successfully on the breach step
+# by comparing min values — breached DEM should have lower min than burned DEM
+# in areas where depressions were carved through
+dem_burned <- terra::rast(here("testing/BNWT1/dem_burned.tif"))
+dem_breached <- terra::rast(here("testing/BNWT1/dem_breached.tif"))
+terra::global(dem_burned, "min", na.rm = TRUE)
+terra::global(dem_breached, "min", na.rm = TRUE)
+
+# 3. Check the WBT working directory — this is a common source of silent
+# failures where WBT can't find input files and writes nothing or a corrupt
+# output. WBT resolves relative paths from its own working directory,
+# not R's working directory.
+whitebox::wbt_wd()
+getwd()
+
+# 4. Try running breach with absolute paths explicitly
+whitebox::wbt_breach_depressions_least_cost(
+  dem = normalizePath(here("testing/BNWT1/dem_burned.tif"), mustWork = TRUE),
+  output = normalizePath(
+    here("testing/BNWT1/dem_breached2.tif"),
+    mustWork = FALSE
+  ),
+  dist = 10,
+  fill = FALSE
+)
+
+# 5. Then run flow accumulation on the new breached output with absolute paths
+whitebox::wbt_d8_pointer(
+  dem = normalizePath(here("testing/BNWT1/dem_breached2.tif"), mustWork = TRUE),
+  output = normalizePath(
+    here("testing/BNWT1/flow_pointer2.tif"),
+    mustWork = FALSE
+  )
+)
+
+whitebox::wbt_d8_flow_accumulation(
+  input = normalizePath(
+    here("testing/BNWT1/flow_pointer2.tif"),
+    mustWork = TRUE
+  ),
+  output = normalizePath(
+    here("testing/BNWT1/flow_accum2.tif"),
+    mustWork = FALSE
+  ),
+  out_type = "cells",
+  pntr = TRUE
+)
+
+# 6. Compare flow accumulation max values — should be in the thousands to millions
+terra::global(
+  terra::rast(here("testing/BNWT1/flow_accum.tif")),
+  "max",
+  na.rm = TRUE
+)
+terra::global(
+  terra::rast(here("testing/BNWT1/flow_accum2.tif")),
+  "max",
+  na.rm = TRUE
+)
+
+
+# Check what the NoData value is set to
+terra::NAflag(dem_burned)
+terra::NAflag(dem_breached)
+
+# Check if -10018 appears frequently or just at edges
+terra::freq(dem_burned < -1000)
+
+
+# Use:
+inuvik_dem <- crop(mrdem, ext(inuvik)) # rectangular crop only, no mask
+
+
+# Crop without mask
+inuvik_dem_fix <- crop(mrdem, ext(inuvik))
+terra::global(inuvik_dem_fix, "min", na.rm = TRUE)
+terra::freq(inuvik_dem_fix < -1000)
+
+# Write and rerun the breach/pointer/accumulation chain
+terra::writeRaster(
+  inuvik_dem_fix,
+  normalizePath(here("testing/BNWT1/dem_fix.tif"), mustWork = FALSE),
+  overwrite = TRUE
+)
+
+whitebox::wbt_fill_burn(
+  dem = normalizePath(here("testing/BNWT1/dem_fix.tif"), mustWork = TRUE),
+  streams = normalizePath(
+    here("testing/BNWT1/stream_tmp.shp"),
+    mustWork = TRUE
+  ),
+  output = normalizePath(
+    here("testing/BNWT1/dem_burned_fix.tif"),
+    mustWork = FALSE
+  )
+)
+
+whitebox::wbt_breach_depressions_least_cost(
+  dem = normalizePath(
+    here("testing/BNWT1/dem_burned_fix.tif"),
+    mustWork = TRUE
+  ),
+  output = normalizePath(
+    here("testing/BNWT1/dem_breached_fix.tif"),
+    mustWork = FALSE
+  ),
+  dist = 10,
+  fill = FALSE
+)
+
+whitebox::wbt_d8_pointer(
+  dem = normalizePath(
+    here("testing/BNWT1/dem_breached_fix.tif"),
+    mustWork = TRUE
+  ),
+  output = normalizePath(
+    here("testing/BNWT1/flow_pointer_fix.tif"),
+    mustWork = FALSE
+  )
+)
+
+whitebox::wbt_d8_flow_accumulation(
+  input = normalizePath(
+    here("testing/BNWT1/flow_pointer_fix.tif"),
+    mustWork = TRUE
+  ),
+  output = normalizePath(
+    here("testing/BNWT1/flow_accum_fix.tif"),
+    mustWork = FALSE
+  ),
+  out_type = "cells",
+  pntr = TRUE
+)
+
+terra::global(
+  terra::rast(here("testing/BNWT1/flow_accum_fix.tif")),
+  "max",
+  na.rm = TRUE
+)
+
+
+whitebox::wbt_breach_depressions_least_cost(
+  dem = normalizePath(
+    here("testing/BNWT1/dem_burned_fix.tif"),
+    mustWork = TRUE
+  ),
+  output = normalizePath(
+    here("testing/BNWT1/dem_breached_fix2.tif"),
+    mustWork = FALSE
+  ),
+  dist = 10,
+  fill = TRUE # fill remaining pits after breaching
+)
+
+whitebox::wbt_d8_pointer(
+  dem = normalizePath(
+    here("testing/BNWT1/dem_breached_fix2.tif"),
+    mustWork = TRUE
+  ),
+  output = normalizePath(
+    here("testing/BNWT1/flow_pointer_fix2.tif"),
+    mustWork = FALSE
+  )
+)
+
+whitebox::wbt_d8_flow_accumulation(
+  input = normalizePath(
+    here("testing/BNWT1/flow_pointer_fix2.tif"),
+    mustWork = TRUE
+  ),
+  output = normalizePath(
+    here("testing/BNWT1/flow_accum_fix2.tif"),
+    mustWork = FALSE
+  ),
+  out_type = "cells",
+  pntr = TRUE
+)
+
+terra::global(
+  terra::rast(here("testing/BNWT1/flow_accum_fix2.tif")),
+  "max",
+  na.rm = TRUE
+)

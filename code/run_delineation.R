@@ -29,7 +29,6 @@
 #   delineation entirely. The provided .gpkg is loaded directly and flows
 #   through to the output merge.
 
-
 # -----------------------------------------------------------------------------
 # Setup
 # -----------------------------------------------------------------------------
@@ -63,10 +62,13 @@ sites <- read_csv(here("data/sites.csv"), show_col_types = FALSE)
 
 # Separate sites that need delineation from those with existing catchments
 sites_delineate <- sites |> filter(is.na(catchment_file))
-sites_external  <- sites |> filter(!is.na(catchment_file))
+sites_external <- sites |> filter(!is.na(catchment_file))
 
 message("Sites to delineate: ", nrow(sites_delineate))
 message("External catchments: ", nrow(sites_external))
+
+test_site <- sites |>
+  filter(site_name == "PHPP05")
 
 
 # =============================================================================
@@ -80,11 +82,13 @@ message("External catchments: ", nrow(sites_external))
 
 message("\n--- Building AOIs ---")
 
-aoi_list <- sites_delineate |>
+aoi_list <- test_site |>
   rowwise() |>
-  mutate(aoi = list(
-    build_aoi(lon, lat, NHN_INDEX_PATH)
-  )) |>
+  mutate(
+    aoi = list(
+      build_aoi(lon, lat, NHN_INDEX_PATH)
+    )
+  ) |>
   ungroup()
 
 
@@ -95,6 +99,9 @@ aoi_list <- sites_delineate |>
 # products. Deduplicating here ensures the expensive WBT steps run once per
 # spatial group, not once per site.
 
+# unnest() flattens the aoi sf object into the data frame — the geometry
+# becomes a bare sfc column accessible as st_sf(geometry = geometry) inside
+# rowwise() mutate calls in sections 5 and 6.
 aoi_groups <- aoi_list |>
   unnest(aoi) |>
   distinct(wscssda_key, .keep_all = TRUE)
@@ -130,15 +137,18 @@ aoi_groups <- aoi_groups |>
   mutate(
     nhn_streams = list(
       if (isTRUE(burn_streams)) {
-        download_nhn_streams(aoi[[1]])
+        download_nhn_streams(st_sf(geometry = geometry))
       } else {
-        message("  Skipping stream download for ", wscssda_key,
-                " (burn_streams = FALSE)")
+        message(
+          "  Skipping stream download for ",
+          wscssda_key,
+          " (burn_streams = FALSE)"
+        )
         NULL
       }
     ),
     nhn_lakes = list(
-      download_nhn_lakes(aoi[[1]])
+      download_nhn_lakes(st_sf(geometry = geometry))
     )
   ) |>
   ungroup()
@@ -163,17 +173,28 @@ message("\n--- DEM conditioning ---")
 aoi_groups <- aoi_groups |>
   rowwise() |>
   mutate(
-    dem_raw      = load_mrdem(aoi[[1]], cache_dir),
-    dem_burned   = burn_streams(dem_raw, nhn_streams[[1]], cache_dir),
+    dem_raw = load_mrdem(st_sf(geometry = geometry), cache_dir),
+    # Save NHN layers here — dem_raw.tif now exists so streams can be clipped
+    # to the exact raster extent, preventing WBT sentinel values at edges
+    nhn_paths = list(save_nhn_layers(
+      streams = nhn_streams[[1]],
+      lakes = nhn_lakes[[1]],
+      dem_file = dem_raw,
+      cache_dir = cache_dir
+    )),
+    dem_burned = burn_streams(dem_raw, nhn_paths[["streams_shp"]], cache_dir),
     dem_breached = breach_dem(dem_burned, cache_dir),
-    fdr          = flow_direction(dem_breached, cache_dir),
-    fac          = flow_accumulation(fdr, cache_dir)
+    fdr = flow_direction(dem_breached, cache_dir),
+    fac = flow_accumulation(fdr, cache_dir)
   ) |>
   ungroup()
 
 message("\nDEM conditioning complete. Cache locations:")
-walk2(aoi_groups$wscssda_key, aoi_groups$cache_dir,
-      ~message("  ", .x, " → ", .y))
+walk2(
+  aoi_groups$wscssda_key,
+  aoi_groups$cache_dir,
+  ~ message("  ", .x, " → ", .y)
+)
 
 
 # =============================================================================
@@ -200,34 +221,40 @@ message("\n--- Delineating catchments ---")
 
 catchments_delineated <- sites_delineate |>
   rowwise() |>
-  mutate(catchment = list({
+  mutate(
+    catchment = list({
+      # Capture site_name as a local variable before filtering aoi_groups.
+      # Inside rowwise(), filter(site_name == site_name) is a tautology —
+      # dplyr compares the column to itself rather than to the current row value.
+      # Assigning to a local name avoids this ambiguity.
+      this_site <- site_name
+      grp <- aoi_groups |>
+        filter(site_name == this_site) |>
+        slice(1)
 
-    # Look up this site's spatial group
-    grp <- aoi_groups |>
-      filter(wscssda_key == aoi_list$aoi[[
-        which(aoi_list$site_name == site_name)
-      ]]$wscssda_key)
-
-    delineate_catchment(
-      site      = pick(everything()),
-      fdr_file  = grp$fdr,
-      fac_file  = grp$fac,
-      cache_dir = grp$cache_dir
-    )
-  })) |>
+      delineate_catchment(
+        site = pick(everything()),
+        fdr_file = grp$fdr,
+        fac_file = grp$fac,
+        cache_dir = grp$cache_dir
+      )
+    })
+  ) |>
   ungroup()
 
 # Load external catchments
 catchments_external <- sites_external |>
   rowwise() |>
-  mutate(catchment = list(
-    st_read(catchment_file, quiet = TRUE) |>
-      mutate(
-        site_name      = site_name,
-        pour_point_src = "external",
-        area_km2       = as.numeric(st_area(geometry)) / 1e6
-      )
-  )) |>
+  mutate(
+    catchment = list(
+      st_read(catchment_file, quiet = TRUE) |>
+        mutate(
+          site_name = site_name,
+          pour_point_src = "external",
+          area_km2 = as.numeric(st_area(geometry)) / 1e6
+        )
+    )
+  ) |>
   ungroup()
 
 # Combine
@@ -250,9 +277,13 @@ catchments <- catchments |>
   rowwise() |>
   mutate(boundary_ok = {
     if (!is.na(catchment_file)) {
-      TRUE  # external catchments not checked
+      TRUE # external catchments not checked
     } else {
-      site_aoi <- aoi_list$aoi[[which(aoi_list$site_name == site_name)]]
+      this_site <- site_name
+      site_aoi <- aoi_groups |>
+        filter(site_name == this_site) |>
+        slice(1) |>
+        st_sf(geometry = geometry)
       !catchment_touches_boundary(catchment[[1]], site_aoi)
     }
   }) |>
@@ -262,9 +293,11 @@ flagged <- catchments |> filter(!boundary_ok) |> pull(site_name)
 
 if (length(flagged) > 0) {
   warning(
-    length(flagged), " site(s) have catchments that touch the AOI boundary ",
+    length(flagged),
+    " site(s) have catchments that touch the AOI boundary ",
     "and may be truncated:\n",
-    paste0("  ", flagged, collapse = "\n"), "\n",
+    paste0("  ", flagged, collapse = "\n"),
+    "\n",
     "Increase hybas_level for these sites in data/sites.csv and re-run."
   )
 } else {
@@ -300,7 +333,7 @@ st_write(
   all_catchments,
   file.path(OUTPUT_DIR, "catchments_all.gpkg"),
   delete_dsn = TRUE,
-  quiet      = TRUE
+  quiet = TRUE
 )
 message("  Saved: ", file.path(OUTPUT_DIR, "catchments_all.gpkg"))
 
