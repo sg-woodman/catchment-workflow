@@ -69,3 +69,6 @@ rsconnect/
 *.html
 # Quarto project cache
 .quarto/
+
+# -- Positron / VS Code -------------------------------------------------------
+.vscode/

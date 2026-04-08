@@ -2,7 +2,7 @@
  
 A modular, reproducible R workflow for delineating catchments and computing morphometric metrics across multiple sites in Canada. Designed for project-agnostic use — bring a sites table, point it at your data, and run.
  
-**Author:** Sam W.  
+**Author:** Sam Woodman.  
 Natural Resources Canada
  
 > Caching logic, data download helpers, and directory structure components were developed with assistance from Claude (Anthropic).

@@ -1,7 +1,7 @@
 ---
 title: "Catchment Delineation Workflow"
 subtitle: "A modular R workflow for hydrological catchment delineation and morphometric analysis"
-author: "Sam W. — Natural Resources Canada"
+author: "Sam Woodman. — Natural Resources Canada"
 date: today
 format:
   html:
