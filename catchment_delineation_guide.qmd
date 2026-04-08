@@ -1,0 +1,593 @@
+---
+title: "Catchment Delineation Workflow"
+subtitle: "A modular R workflow for hydrological catchment delineation and morphometric analysis"
+author: "Sam W. — Natural Resources Canada"
+date: today
+format:
+  html:
+    toc: true
+    toc-depth: 3
+    toc-location: left
+    toc-title: "Contents"
+    code-fold: true
+    code-tools: true
+    code-link: true
+    theme: flatly
+    highlight-style: github
+    embed-resources: true
+    smooth-scroll: true
+    number-sections: true
+execute:
+  eval: false
+  echo: true
+  warning: false
+  message: false
+---
+
+```{r}
+#| label: setup
+#| include: false
+library(sf)
+library(terra)
+library(whitebox)
+library(dplyr)
+library(tidyr)
+library(purrr)
+library(readr)
+library(tibble)
+library(fs)
+library(cli)
+library(glue)
+library(gt)
+```
+
+::: {.callout-note}
+Caching logic, data download helpers, and directory structure components were developed with assistance from Claude (Anthropic).
+:::
+
+## Overview
+
+This workflow delineates catchments from pour point coordinates for multiple sites across Canada. It is designed to be **project-agnostic** — the inputs are a table of sites and a set of paths to shared data, and the outputs are self-contained per-site folders containing all hydrological raster layers and the catchment polygon.
+
+The workflow handles three challenges that make multi-site delineation complex:
+
+1. **Computational efficiency** — expensive DEM conditioning steps (breach depressions, flow accumulation) run once per hydrologically coherent group of sites, not once per site
+2. **Pour point correction** — intermediate files are preserved so misaligned pour points can be corrected in QGIS without rerunning the full pipeline
+3. **Reproducibility** — file-existence caching means re-running the workflow safely skips completed steps
+
+### Processing stages
+
+```
+Sites table
+    │
+    ▼
+01. Build group manifest    ← HydroBasins defines group AOIs
+    │
+    ▼
+02. Prepare DEM             ← Crop MRDEM VRT to each group AOI
+    │
+    ▼
+03. Burn streams (optional) ← NHN flowlines burned into DEM
+    │
+    ▼
+04. Run WhiteboxTools        ← Breach → Pointer → Accumulation → Streams → Hillshade
+    │
+    ▼
+05. Delineate sites          ← Snap pour point → Watershed → Clip rasters
+    │
+    ▼
+06. Compute metrics          ← Areal, relief, terrain metrics per catchment
+```
+
+### Data sources
+
+| Dataset | CRS | Notes |
+|---|---|---|
+| MRDEM DTM | EPSG:3979 | 30 m national DEM, streamed via VRT |
+| NHN flowlines | EPSG:4617 | Per NTS sheet GDB, pre-downloaded |
+| HydroBasins | WGS84 | `na` + `ar` regions, level 6 default |
+
+---
+
+## Directory structure
+
+```
+catchment-delineation/
+  R/
+    utils.R                  # shared helpers, validation, logging
+    01_group_sites.R         # group AOI construction
+    02_prepare_dem.R         # MRDEM crop
+    03_burn_streams.R        # NHN stream burn-in
+    04_run_whitebox.R        # DEM conditioning chain
+    05_delineate_sites.R     # per-site delineation
+    06_catchment_metrics.R   # morphometric metrics
+  sites_template.R           # define sites as a tibble
+  sites_template.csv         # alternative CSV input
+  delineate_catchments.R     # top-level runner
+  reset_workflow.R           # cache/output reset helpers
+  cache/                     # group-level rasters (auto-created)
+  output/                    # per-site outputs (auto-created)
+```
+
+---
+
+## Setup
+
+### Packages
+
+```{r}
+#| label: packages
+install.packages(c(
+  "sf", "terra", "whitebox",
+  "dplyr", "tidyr", "purrr", "readr", "tibble",
+  "fs", "cli", "glue", "gt"
+))
+
+# Install WhiteboxTools binary
+whitebox::install_whitebox()
+```
+
+### Source all modules
+
+```{r}
+#| label: source-modules
+source("R/utils.R")
+source("R/01_group_sites.R")
+source("R/02_prepare_dem.R")
+source("R/03_burn_streams.R")
+source("R/04_run_whitebox.R")
+source("R/05_delineate_sites.R")
+source("R/06_catchment_metrics.R")
+source("reset_workflow.R")
+```
+
+---
+
+## Defining sites {#sec-sites}
+
+Sites are defined as a `tribble` in `sites_template.R` or as a CSV. The tibble approach is recommended for programmatic construction.
+
+```{r}
+#| label: sites-tibble
+sites <- tribble(
+  ~site_id,  ~site_name,          ~lon,      ~lat,    ~group_id,   ~burn_streams, ~aoi_buffer_m, ~stream_threshold,
+  # ── Sudbury region ──────────────────────────────────────────────────────────
+  "L03",     "Lake 03",           -81.234,   46.123,  "sudbury",   TRUE,          NA,            NA,
+  "L04",     "Lake 04",           -81.198,   46.145,  "sudbury",   TRUE,          NA,            NA,
+  # ── Inuvik region ───────────────────────────────────────────────────────────
+  "YK01",    "Yellowknife 01",    -114.567,  62.456,  "inuvik",    FALSE,         25000,         2000
+)
+```
+
+### Column reference
+
+| Column | Required | Level | Description |
+|---|---|---|---|
+| `site_id` | ✓ | Site | Unique identifier, used as output folder name. No spaces. |
+| `site_name` | ✓ | Site | Human-readable name |
+| `lon` | ✓ | Site | Pour point longitude (WGS84, negative for Canada) |
+| `lat` | ✓ | Site | Pour point latitude (WGS84) |
+| `group_id` | ✓ | Site → Group | Sites sharing a `group_id` share a DEM and flow products |
+| `burn_streams` | ✓ | Group | Whether to burn NHN streams into DEM before conditioning |
+| `aoi_buffer_m` | | Group | Buffer around HydroBasins polygon (m). Default 1000 m |
+| `stream_threshold` | | Group | Flow accumulation cells to define streams. Default 1000 |
+
+::: {.callout-tip}
+Sites in the same `group_id` must have consistent `burn_streams`, `aoi_buffer_m`, and `stream_threshold` values. Validation will error if they differ within a group.
+:::
+
+### Validate sites
+
+```{r}
+#| label: validate
+# From tibble
+sites <- validate_sites_tibble(sites)
+
+# Or from CSV
+# sites <- validate_sites("sites_template.csv")
+
+# Inspect group summary
+get_groups(sites)
+```
+
+---
+
+## Stage 1 — Build group manifest {#sec-groups}
+
+`build_group_manifest()` uses HydroBasins level 6 to construct a processing AOI for each group. Sites in the same group are unioned into a single AOI which becomes the extent for all downstream DEM and NHN operations.
+
+```{r}
+#| label: group-manifest
+group_manifest <- build_group_manifest(
+  sites            = sites,
+  output_dir       = "output",
+  cache_dir        = "cache",
+  hydrobasins_dir  = "/path/to/HydroBasins",
+  default_buffer_m = 1000
+)
+
+print(group_manifest)
+```
+
+### Verify AOIs before proceeding
+
+Always inspect the group AOIs in QGIS before running the DEM step. A group AOI that is too small will truncate the upstream area and produce an incorrect catchment.
+
+```{r}
+#| label: write-aois
+# Writes cache/group_aois.gpkg — load in QGIS to verify extents
+write_group_aois(group_manifest, cache_dir = "cache")
+```
+
+::: {.callout-warning}
+If a catchment appears to be truncated at the AOI boundary, increase `aoi_buffer_m` for that group in the sites table, delete the group cache folder, and rerun from Stage 2.
+:::
+
+### HydroBasins region detection
+
+The workflow automatically detects whether sites fall in the North America (`na`) or Arctic (`ar`) HydroBasins dataset using spatial intersection with the level 1 boundaries. Sites near the na/ar boundary (approximately 60°N) are tested against both.
+
+```{r}
+#| label: region-detection
+# Internal function — shown here for transparency
+region <- resolve_hydrobasins_region(
+  group_pts       = sites_to_sf(sites) |> dplyr::filter(group_id == "inuvik"),
+  hydrobasins_dir = "/path/to/HydroBasins"
+)
+# Returns "na" or "ar"
+```
+
+---
+
+## Stage 2 — Prepare DEM {#sec-dem}
+
+The MRDEM is distributed as a GDAL Virtual Raster (VRT) — a lightweight XML descriptor that references cloud-hosted tiles. No downloading or mosaicking is required. `prepare_dem()` crops the VRT to each group AOI and writes a local GeoTIFF to the group cache.
+
+```{r}
+#| label: prepare-dem
+prepare_dem(
+  group_manifest = group_manifest,
+  mrdem_vrt      = "/path/to/mrdem-30-dtm.vrt",
+  target_crs     = 3979   # MRDEM native CRS — no reprojection needed
+)
+```
+
+### Verify DEM outputs
+
+```{r}
+#| label: verify-dem
+dem_check <- verify_dem_outputs(group_manifest)
+print(dem_check)
+# Expect: crs_epsg = "EPSG:3979", res_x = res_y = 30
+```
+
+::: {.callout-important}
+**Do not mask the DEM to the AOI polygon.** Masking sets pixels outside the polygon boundary to NoData. WhiteboxTools reads these as genuine deep depressions, producing interior pit cells that break flow accumulation. The workflow crops to the rectangular bounding box only.
+:::
+
+---
+
+## Stage 3 — NHN stream burning {#sec-nhn}
+
+Stream burning carves the mapped stream network into the DEM before hydrological conditioning. This anchors flow paths to known channel locations — particularly important in flat northern terrain where the DEM alone may not capture subtle valley gradients.
+
+```{r}
+#| label: burn-streams
+prepare_nhn_layers(
+  group_manifest = group_manifest,
+  nhn_dir        = "/path/to/NHN/gdb",
+  nhn_index      = "/path/to/NHN_INDEX_WORKUNIT_LIMIT_2.shp"
+)
+```
+
+### How NHN sheets are matched
+
+The NHN index shapefile maps NTS sheet codes to spatial extents. The workflow intersects each group AOI against the index, then locates the corresponding GDB folders on disk using prefix matching against the folder names (e.g. sheet code `10LC` matches folder `nhn_rhn_10lc000_gdb_en`). This handles the inconsistent naming conventions across NHN versions.
+
+### Geometry handling
+
+NHN flowlines require two geometry fixes before WhiteboxTools can process them:
+
+1. **Drop M coordinates** (`st_zm()`) — NHN features carry measure values that GEOS and WhiteboxTools cannot handle
+2. **Cast to MULTILINESTRING** — mixing `LINESTRING` and `MULTILINESTRING` across GDB work units produces an unrecognised ShapeType that causes a Rust panic in WhiteboxTools
+
+```{r}
+#| label: nhn-geom-fix
+# Applied internally in burn_streams_into_dem()
+flowlines |>
+  sf::st_zm(drop = TRUE, what = "ZM") |>
+  sf::st_cast("MULTILINESTRING") |>
+  sf::st_write(streams_shp, delete_dsn = TRUE, quiet = TRUE)
+```
+
+### Groups without NHN coverage
+
+If no NHN sheets are found for a group, empty `flowlines.gpkg` and `waterbodies.gpkg` are written and a warning is issued. The workflow continues with `burn_streams = FALSE` for that group — it never errors on missing NHN data.
+
+---
+
+## Stage 4 — WhiteboxTools conditioning {#sec-whitebox}
+
+Four DEM conditioning steps run in sequence for each group. Each step checks for its output before running, so a failed run can be safely restarted.
+
+```{r}
+#| label: run-whitebox
+run_whitebox(
+  group_manifest           = group_manifest,
+  max_dist                 = 10,     # max breach path length (cells)
+  flat_increment           = NULL,   # WBT determines automatically
+  fill                     = TRUE,   # fill remaining pits after breaching
+  default_stream_threshold = 1000    # flow accumulation cells → stream
+)
+```
+
+### Step-by-step
+
+**Step 1: Breach depressions** (`wbt_breach_depressions_least_cost`)
+
+Removes topographic sinks by carving breach paths rather than filling. `dist = 10` (300 m at 30 m resolution) limits breach path length to avoid creating artificial long drainage channels. `fill = TRUE` fills any remaining depressions that breaching could not resolve — necessary for flat northern landscapes with thermokarst lakes and genuine closed depressions.
+
+```{r}
+#| label: breach
+whitebox::wbt_breach_depressions_least_cost(
+  dem    = "cache/group/dem_burned.tif",
+  output = "cache/group/dem_breached.tif",
+  dist   = 10,
+  fill   = TRUE
+)
+```
+
+**Step 2: D8 flow pointer** (`wbt_d8_pointer`)
+
+Computes the D8 flow direction raster — each cell stores a power-of-2 value (1, 2, 4, 8, 16, 32, 64, 128) indicating which of its 8 neighbours receives flow.
+
+**Step 3: D8 flow accumulation** (`wbt_d8_flow_accumulation`)
+
+::: {.callout-important}
+The input must be the **flow pointer raster**, not the DEM. Passing the DEM causes WhiteboxTools to re-derive flow direction internally, bypassing the stream-burned conditioning. `pntr = TRUE` is required to tell WhiteboxTools the input is a pre-computed pointer.
+:::
+
+```{r}
+#| label: flow-accum
+whitebox::wbt_d8_flow_accumulation(
+  input    = "cache/group/flow_pointer.tif",
+  output   = "cache/group/flow_accum.tif",
+  out_type = "cells",
+  pntr     = TRUE   # ← critical
+)
+```
+
+**Step 4: Extract streams** (`wbt_extract_streams`)
+
+Applies the `stream_threshold` to the flow accumulation raster to produce a binary streams raster used for pour point snapping. The threshold controls how sensitive the stream network is — lower values produce more streams including headwater channels; higher values retain only main channels.
+
+**Step 5: Hillshade** (`wbt_hillshade`)
+
+Computed from the breached DEM for visual QA.
+
+### Verify outputs
+
+```{r}
+#| label: verify-whitebox
+wb_check <- verify_whitebox_outputs(group_manifest)
+print(wb_check)
+# flow_accum max should be >> 1000 for any group covering a significant basin
+```
+
+---
+
+## Stage 5 — Site delineation {#sec-delineate}
+
+Each site is delineated independently using the group-level flow products. All intermediate files are retained for inspection and pour point correction.
+
+```{r}
+#| label: delineate
+results <- delineate_catchments(
+  sites          = sites,
+  group_manifest = group_manifest,
+  output_dir     = "output",
+  snap_dist      = 200,   # metres
+  min_cells      = 10     # catchments smaller than this are flagged
+)
+
+print(results)
+```
+
+### Per-site processing steps
+
+For each site:
+
+1. **Write pour point** as `.shp` in EPSG:3979
+2. **Snap to nearest stream** using `wbt_jenson_snap_pour_points()` — snaps to the nearest stream cell within `snap_dist` metres. Snapping to the binary streams raster (not the raw flow accumulation) prevents the point from jumping to a distant high-accumulation cell
+3. **Delineate watershed** using `wbt_watershed()` from the snapped pour point and D8 flow pointer
+4. **Convert to polygon** using `wbt_raster_to_vector_polygons()` — uses the same grid as the Whitebox processing chain, producing cleaner boundaries than `terra::as.polygons()`
+5. **Clip group rasters** to catchment extent and mask to catchment polygon
+6. **Clip NHN flowlines** to catchment polygon
+
+### Correcting a misaligned pour point
+
+If a delineated catchment is obviously wrong (too small, wrong watershed), the pour point likely snapped to the wrong stream cell:
+
+1. Open `output/<site_id>/pour_point_snapped.shp` and `output/<site_id>/streams_tmp.tif` in QGIS
+2. Edit `pour_point_snapped.shp` — move the point to the correct stream cell
+3. Reset and rerun the site only:
+
+```{r}
+#| label: reset-site
+source("reset_workflow.R")
+reset_site("L03")
+
+# Rerun delineation — will detect existing snapped point and skip to watershed step
+results <- delineate_catchments(
+  sites          = sites,
+  group_manifest = group_manifest,
+  output_dir     = "output",
+  snap_dist      = 200,
+  min_cells      = 10
+)
+```
+
+### Per-site output files
+
+```
+output/<site_id>/
+  pour_point.shp            original coordinates
+  pour_point_snapped.shp    snapped coordinates ← edit to correct
+  streams_tmp.tif           streams raster for snapping
+  flow_pointer_tmp.tif      flow pointer for watershed
+  watershed.tif             binary watershed raster
+  catchment.gpkg            catchment polygon (EPSG:3979)
+  pour_point.gpkg           snapped pour point (EPSG:3979)
+  dem.tif                   DEM clipped to catchment
+  dem_breached.tif          breached DEM clipped to catchment
+  flow_pointer.tif          flow pointer clipped to catchment
+  flow_accum.tif            flow accumulation clipped to catchment
+  streams.tif               stream network clipped to catchment
+  hillshade.tif             hillshade clipped to catchment
+  streams.gpkg              NHN flowlines clipped to catchment
+```
+
+### Combine all catchments
+
+```{r}
+#| label: combine-catchments
+all_catchments <- purrr::map(sites$site_id, function(sid) {
+  path <- fs::path(site_output_dir("output", sid), "catchment.gpkg")
+  if (!cache_exists(path)) return(NULL)
+  sf::st_read(path, quiet = TRUE)
+}) |>
+  purrr::compact() |>
+  dplyr::bind_rows()
+
+sf::st_write(
+  all_catchments,
+  "output/all_catchments.gpkg",
+  delete_dsn = TRUE,
+  quiet      = TRUE
+)
+```
+
+---
+
+## Stage 6 — Morphometric metrics {#sec-metrics}
+
+Catchment morphometric parameters following Shekar & Mathew (2024) are computed from the catchment polygon and site DEM.
+
+```{r}
+#| label: metrics
+source("R/06_catchment_metrics.R")
+
+metrics   <- calculate_catchment_metrics(sites, output_dir = "output")
+ref_table <- build_metrics_reference_table()
+
+write_metrics_outputs(
+  metrics    = metrics,
+  ref_table  = ref_table,
+  output_dir = "output"
+)
+```
+
+### Parameter categories
+
+**Geometry** — area, perimeter, basin length, mean width
+
+**Areal (shape)** — form factor, circularity ratio, elongation ratio, compactness coefficient, shape index, lemniscate ratio
+
+**Relief** — basin relief, relief ratio, relative relief, ruggedness number, dissection index, hypsometric integral, mean slope, mean aspect, elevation SD
+
+::: {.callout-note}
+The ruggedness number uses basin length / area as a proxy for drainage density since stream network metrics are not computed in this module. Flag these values when reporting if precise drainage density is needed.
+:::
+
+### Reference
+
+Shekar, P.R. & Mathew, A. (2024). Morphometric analysis of watersheds: A comprehensive review of data sources, quality, and geospatial techniques. *Watershed Ecology and the Environment*, 6, 13–25. <https://doi.org/10.1016/j.wsee.2023.12.001>
+
+---
+
+## Resetting the workflow {#sec-reset}
+
+```{r}
+#| label: reset
+source("reset_workflow.R")
+
+reset_all(cache_dir = "cache", output_dir = "output")   # full reset
+reset_cache(cache_dir = "cache")                         # group rasters only
+reset_sites(sites, output_dir = "output")                # all site outputs
+reset_group("sudbury", sites)                            # one group + its sites
+reset_site("L03")                                        # one site only
+```
+
+All reset functions ask for confirmation before deleting. Pass `confirm = FALSE` to skip the prompt (e.g. in scripted use).
+
+---
+
+## Caching behaviour {#sec-caching}
+
+The workflow uses file-existence checks to avoid rerunning completed steps. Each module function checks whether its expected output file exists before running. If the file exists and is non-empty, the step is skipped with an informational message.
+
+This means:
+
+- Adding a new site to an existing group only triggers Stage 5 (delineation) — the expensive DEM conditioning from Stage 4 is reused
+- A session crash mid-run can be safely restarted — completed steps are skipped automatically
+- Changing a parameter (e.g. `stream_threshold`) requires manually deleting the affected cache files before rerunning
+
+The `cache_exists()` helper used throughout:
+
+```{r}
+#| label: cache-exists
+cache_exists <- function(path) {
+  fs::file_exists(path) && fs::file_size(path) > 0
+}
+```
+
+---
+
+## Common issues {#sec-troubleshooting}
+
+### Interior pit cells warning from WhiteboxTools
+
+```
+WARNING: Interior pit cells were found within the input DEM.
+```
+
+**Cause:** The DEM was masked to the AOI polygon before processing, introducing NoData sentinel values that WhiteboxTools reads as deep depressions.
+**Fix:** Ensure `prepare_dem()` crops to the rectangular extent only (no `terra::mask()`). This is the current behaviour — if you see this warning, check that your DEM was not masked externally before being passed to the workflow.
+
+### Flow accumulation max value is unrealistically small (< 100)
+
+**Cause:** `wbt_d8_flow_accumulation()` was passed the DEM instead of the flow pointer raster, or `pntr = TRUE` was omitted.
+**Fix:** The workflow uses `pntr = TRUE` and passes `flow_pointer.tif` — verify these are correct if you call the Whitebox functions directly.
+
+### NHN sheet not found
+
+```
+NHN subfolder not found for sheet 'XX': ...no folder matching 'nhn_rhn_XX*'
+```
+
+**Cause:** The NHN GDB for that sheet has not been downloaded to `nhn_dir`.
+**Fix:** Download the missing sheet from [GeoBase NHN](https://open.canada.ca/data/en/dataset/a4b190fe-e090-4e6d-881e-b87956c07977) and place in `nhn_dir`. The workflow degrades gracefully (empty flowlines, no burn) rather than erroring.
+
+### Catchment is too small / single watershed unit
+
+**Cause:** The pour point snapped to a tributary rather than the main channel, or `stream_threshold` is too low (too many stream cells, snap target is ambiguous).
+**Fix:** Increase `stream_threshold` for that group, or manually correct `pour_point_snapped.shp` as described in @sec-delineate.
+
+### `build_group_manifest()` errors with invalid geometry
+
+```
+Loop N is not valid: Edge M has duplicate vertex with edge N
+```
+
+**Cause:** HydroBasins shapefiles contain invalid geometries (a known data quality issue).
+**Fix:** `st_make_valid()` is applied automatically inside `build_group_aoi()`. If the error persists, it may be coming from a different geometry operation — check the traceback.
+
+---
+
+## Session info
+
+```{r}
+#| label: session-info
+#| code-fold: false
+sessionInfo()
+```
