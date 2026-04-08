@@ -31,6 +31,8 @@ data/processed/cache/
 
 # RStudio files
 .Rproj.user/
+.Ruserdata
+*.Rproj
 
 # produced vignettes
 vignettes/*.html
@@ -59,3 +61,11 @@ po/*~
 # RStudio Connect folder
 rsconnect/
 .DS_Store
+
+# -- Quarto / RMarkdown rendered output ---------------------------------------
+# Auto-generated supporting asset folders created when previewing .qmd/.md
+*_files/
+# Rendered HTML (single-file outputs are fine to share but not to track)
+*.html
+# Quarto project cache
+.quarto/
