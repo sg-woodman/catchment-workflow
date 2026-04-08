@@ -58,13 +58,13 @@ source("reset_workflow.R")
 
 # Sites — defined as a tibble (recommended) or path to CSV
 # Option A: tibble (edit sites_template.R and source it)
-source("sites_template.R")   # loads `sites` tibble into environment
+source("sites_template.R") # loads `sites` tibble into environment
 # Option B: CSV file
 # sites_csv <- "sites_template.csv"
 
 # Root directories
 output_dir <- "output"
-cache_dir  <- "cache"
+cache_dir <- "cache"
 
 # Path to MRDEM .vrt file
 mrdem_vrt <- "/path/to/mrdem-30-dtm.vrt"
@@ -79,12 +79,12 @@ nhn_index <- "/Users/sam/Documents/cfs/shared_data/raw/hydro/networks/NHN/NHN_IN
 hydrobasins_dir <- "/Users/sam/Documents/cfs/shared_data/raw/hydro/watersheds/HydroBasins"
 
 # Global parameters (can be overridden per group via sites tibble columns)
-default_buffer_m         <- 1000   # buffer around HydroBasins polygon (metres)
-target_crs               <- 3979   # output CRS — matches MRDEM native CRS
-snap_dist                <- 200    # pour point snap distance (metres)
-default_stream_threshold <- 1000   # flow accumulation threshold for streams
-max_dist                 <- 10     # max breach path length (cells)
-min_cells                <- 10     # minimum catchment size before flagging
+default_buffer_m <- 1000 # buffer around HydroBasins polygon (metres)
+target_crs <- 3979 # output CRS — matches MRDEM native CRS
+snap_dist <- 200 # pour point snap distance (metres)
+default_stream_threshold <- 1000 # flow accumulation threshold for streams
+max_dist <- 10 # max breach path length (cells)
+min_cells <- 10 # minimum catchment size before flagging
 
 # =============================================================================
 # STAGE 1 — Validate sites and build group manifest
@@ -98,10 +98,10 @@ sites <- validate_sites_tibble(sites)
 # sites <- validate_sites(sites_csv)  # CSV alternative
 
 group_manifest <- build_group_manifest(
-  sites            = sites,
-  output_dir       = output_dir,
-  cache_dir        = cache_dir,
-  hydrobasins_dir  = hydrobasins_dir,
+  sites = sites,
+  output_dir = output_dir,
+  cache_dir = cache_dir,
+  hydrobasins_dir = hydrobasins_dir,
   default_buffer_m = default_buffer_m
 )
 
@@ -119,8 +119,8 @@ message(glue(
 
 prepare_dem(
   group_manifest = group_manifest,
-  mrdem_vrt      = mrdem_vrt,
-  target_crs     = target_crs
+  mrdem_vrt = mrdem_vrt,
+  target_crs = target_crs
 )
 
 # =============================================================================
@@ -129,8 +129,8 @@ prepare_dem(
 
 prepare_nhn_layers(
   group_manifest = group_manifest,
-  nhn_dir        = nhn_dir,
-  nhn_index      = nhn_index
+  nhn_dir = nhn_dir,
+  nhn_index = nhn_index
 )
 
 # =============================================================================
@@ -138,10 +138,10 @@ prepare_nhn_layers(
 # =============================================================================
 
 run_whitebox(
-  group_manifest           = group_manifest,
-  max_dist                 = max_dist,
-  flat_increment           = NULL,
-  fill                     = TRUE,
+  group_manifest = group_manifest,
+  max_dist = max_dist,
+  flat_increment = NULL,
+  fill = TRUE,
   default_stream_threshold = default_stream_threshold
 )
 
@@ -154,11 +154,11 @@ print(wb_check)
 # =============================================================================
 
 results <- delineate_catchments(
-  sites          = sites,
+  sites = sites,
   group_manifest = group_manifest,
-  output_dir     = output_dir,
-  snap_dist      = snap_dist,
-  min_cells      = min_cells
+  output_dir = output_dir,
+  snap_dist = snap_dist,
+  min_cells = min_cells
 )
 
 print(results)
@@ -166,7 +166,9 @@ print(results)
 # Combine all catchment polygons into a single file for QA in QGIS
 all_catchments <- purrr::map(sites$site_id, function(sid) {
   path <- fs::path(site_output_dir(output_dir, sid), "catchment.gpkg")
-  if (!cache_exists(path)) return(NULL)
+  if (!cache_exists(path)) {
+    return(NULL)
+  }
   sf::st_read(path, quiet = TRUE)
 }) |>
   purrr::compact() |>
@@ -176,7 +178,7 @@ sf::st_write(
   all_catchments,
   fs::path(output_dir, "all_catchments.gpkg"),
   delete_dsn = TRUE,
-  quiet      = TRUE
+  quiet = TRUE
 )
 
 message(glue(
@@ -188,5 +190,25 @@ message(glue(
 flagged <- dplyr::filter(results, flagged)
 if (nrow(flagged) > 0) {
   message(glue("\n{nrow(flagged)} site(s) flagged — review pour points:"))
-  print(flagged[, c("site_id", "catchment_cells", "catchment_km2", "flag_reason")])
+  print(flagged[, c(
+    "site_id",
+    "catchment_cells",
+    "catchment_km2",
+    "flag_reason"
+  )])
 }
+
+# =============================================================================
+# STAGE 6 (optional) — Catchment morphometric metrics
+# =============================================================================
+# Comment out if metrics are not needed for this project.
+
+metrics <- calculate_catchment_metrics(sites = sites, output_dir = output_dir)
+ref_table <- build_metrics_reference_table()
+write_metrics_outputs(
+  metrics = metrics,
+  ref_table = ref_table,
+  output_dir = output_dir
+)
+
+print(metrics)
