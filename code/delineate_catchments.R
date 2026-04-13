@@ -42,6 +42,7 @@ library(tibble)
 library(fs)
 library(cli)
 library(glue)
+library(here)
 
 # -- Source all modules ------------------------------------------------------
 source("R/utils.R")
@@ -50,7 +51,8 @@ source("R/02_prepare_dem.R")
 source("R/03_burn_streams.R")
 source("R/04_run_whitebox.R")
 source("R/05_delineate_sites.R")
-source("reset_workflow.R")
+source("R/06_catchment_metrics.R")
+source("code/reset_workflow.R")
 
 # =============================================================================
 # CONFIGURATION — fill in before running
@@ -60,20 +62,20 @@ source("reset_workflow.R")
 # Option A: tibble (edit sites_template.R and source it)
 source("sites_template.R") # loads `sites` tibble into environment
 # Option B: CSV file
-# sites_csv <- "sites_template.csv"
+sites_csv <- read_csv(here("data/emma_perry_sites.csv"))
 
 # Root directories
 output_dir <- "output"
 cache_dir <- "cache"
 
 # Path to MRDEM .vrt file
-mrdem_vrt <- "/path/to/mrdem-30-dtm.vrt"
+mrdem_vrt <- "~/Documents/cfs/shared_data/raw/dem/mrdem-30-dtm.vrt"
 
 # Path to NHN root directory (containing nhn_rhn_*_gdb_en subfolders)
 nhn_dir <- "/Users/sam/Documents/cfs/shared_data/raw/hydro/networks/NHN/gdb"
 
 # Path to NHN index shapefile
-nhn_index <- "/Users/sam/Documents/cfs/shared_data/raw/hydro/networks/NHN/NHN_INDEX_WORKUNIT_LIMIT_2/NHN_INDEX_WORKUNIT_LIMIT_2.shp"
+nhn_index <- "/Users/sam/Documents/cfs/shared_data/raw/hydro/networks/NHN/NHN_INDEX_WORKUNIT_LIMIT_2/NHN_INDEX_22_INDEX_WORKUNIT_LIMIT_2.shp"
 
 # Path to HydroBasins root directory (containing 'north_america' and 'arctic')
 hydrobasins_dir <- "/Users/sam/Documents/cfs/shared_data/raw/hydro/watersheds/HydroBasins"
@@ -94,7 +96,7 @@ check_packages()
 
 # Validate sites — use validate_sites_tibble() if using tibble approach,
 # or validate_sites() if using CSV
-sites <- validate_sites_tibble(sites)
+sites <- validate_sites_tibble(sites_csv)
 # sites <- validate_sites(sites_csv)  # CSV alternative
 
 group_manifest <- build_group_manifest(

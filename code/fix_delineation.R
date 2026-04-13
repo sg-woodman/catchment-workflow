@@ -43,5 +43,5 @@ plot(catchment)
 writeVector(
   catchment,
   paste0(here("output/"), site_id, "/catchment.gpkg"),
-  overwrite = T
+  overwrite = TRUE
 )
