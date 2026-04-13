@@ -35,9 +35,9 @@
 
 # -- Layer name constants ----------------------------------------------------
 
-# NHN layer names — consistent across all GDB versions
-NHN_FLOWLINE_LAYER    <- "NHN_HN_PrimaryDirectedNLFlow_1"
-NHN_WATERBODY_LAYER   <- "NHN_HD_WATERBODY_2"
+# NHN GDB layer names — consistent across all GDB versions
+NHN_FLOWLINE_LAYER  <- "NHN_HN_PrimaryDirectedNLFlow_1"
+NHN_WATERBODY_LAYER <- "NHN_HD_WATERBODY_2"
 
 # -- Main entry point --------------------------------------------------------
 
@@ -124,7 +124,7 @@ prepare_nhn_layers <- function(
 
     if (!vector_outputs_exist) {
 
-      flowlines   <- read_merge_nhn_layer(sheets, NHN_FLOWLINE_LAYER, aoi, grp)
+      flowlines   <- read_merge_nhn_layer(sheets, NHN_FLOWLINE_LAYER,  aoi, grp)
       waterbodies <- read_merge_nhn_layer(sheets, NHN_WATERBODY_LAYER, aoi, grp)
 
       # Write vector outputs to cache
@@ -244,23 +244,19 @@ find_nhn_sheets <- function(aoi, nhn_idx, nhn_dir, group_id) {
   ))
 
   # Locate GDB files on disk for each sheet code.
-  #
   # The NHN index uses 4-character WSCSSDA codes (e.g. "10LC") but folder
   # names on disk use 7-character codes (e.g. "nhn_rhn_10lc000_gdb_en").
-  # Rather than constructing the folder name directly, we match each index
-  # code as a case-insensitive prefix against all folders present in nhn_dir.
-  # This handles all suffix variants (000, 001, 002, etc.) robustly.
+  # We match by prefix against all folders in nhn_dir, which handles all
+  # suffix variants (000, 001, 002, etc.) robustly.
 
-  # Get all subfolder names in nhn_dir once, outside the per-sheet loop
-  all_subfolders <- fs::dir_ls(nhn_dir, type = "directory")
+  all_subfolders      <- fs::dir_ls(nhn_dir, type = "directory")
   all_subfolder_names <- fs::path_file(all_subfolders)
 
   gdb_paths <- purrr::map(sheet_codes, function(code) {
 
-    # Match folders whose name starts with nhn_rhn_<code> (case-insensitive)
-    pattern   <- paste0("^nhn_rhn_", tolower(code))
-    matched   <- all_subfolders[grepl(pattern, all_subfolder_names,
-                                      ignore.case = TRUE)]
+    pattern <- paste0("^nhn_rhn_", tolower(code))
+    matched <- all_subfolders[grepl(pattern, all_subfolder_names,
+                                    ignore.case = TRUE)]
 
     if (length(matched) == 0) {
       cw_warn(glue::glue(
@@ -270,32 +266,22 @@ find_nhn_sheets <- function(aoi, nhn_idx, nhn_dir, group_id) {
       return(NULL)
     }
 
-    # For each matched subfolder, find the .gdb inside
     purrr::map_chr(matched, function(subfolder) {
       gdbs <- fs::dir_ls(subfolder, glob = "*.gdb", type = "directory")
-
       if (length(gdbs) == 0) {
         cw_warn(glue::glue(
           "Group '{group_id}': no .gdb found in {subfolder}"
         ))
         return(NA_character_)
       }
-
-      if (length(gdbs) > 1) {
-        cw_warn(glue::glue(
-          "Group '{group_id}': multiple .gdb files found in {subfolder}, ",
-          "using first: {gdbs[1]}"
-        ))
-      }
-
       gdbs[1]
     })
+
   }) |>
     unlist() |>
     stats::na.omit() |>
     as.character()
 
-  # Remove any duplicate GDB paths (in case multiple sheets matched same folder)
   gdb_paths <- unique(gdb_paths)
 
   cw_inform(glue::glue(
@@ -310,9 +296,7 @@ find_nhn_sheets <- function(aoi, nhn_idx, nhn_dir, group_id) {
 #' Read, merge, and clip an NHN layer from multiple GDB files
 #'
 #' Reads the specified layer from each GDB, reprojects to EPSG:3979, clips
-#' to the group AOI, and merges into a single sf object. Handles cases where
-#' a layer is absent from a particular GDB (older NHN versions sometimes
-#' omit layers with no features).
+#' to the group AOI, and merges into a single sf object.
 #'
 #' @param gdb_paths  Character vector of .gdb paths from find_nhn_sheets()
 #' @param layer_name Character. NHN layer name to read
@@ -324,43 +308,10 @@ read_merge_nhn_layer <- function(gdb_paths, layer_name, aoi, group_id) {
 
   layers_list <- purrr::map(gdb_paths, function(gdb) {
 
-    # Check layer exists in this GDB
-    available_layers <- tryCatch(
-      sf::st_layers(gdb)$name,
-      error = function(e) {
-        cw_warn(glue::glue(
-          "Group '{group_id}': could not read layers from {gdb}: {e$message}"
-        ))
-        return(character(0))
-      }
-    )
-
-    if (!layer_name %in% available_layers) {
-      cw_warn(glue::glue(
-        "Group '{group_id}': layer '{layer_name}' not found in {fs::path_file(gdb)}. ",
-        "Skipping."
-      ))
-      return(NULL)
-    }
-
-    # Read layer, drop M/Z dimensions (NHN flowlines carry M coordinates
-    # that GEOS cannot handle), and reproject to EPSG:3979
-    lyr <- tryCatch(
-      sf::st_read(gdb, layer = layer_name, quiet = TRUE) |>
-        sf::st_zm(drop = TRUE, what = "ZM") |>
-        sf::st_transform(3979),
-      error = function(e) {
-        cw_warn(glue::glue(
-          "Group '{group_id}': error reading '{layer_name}' from ",
-          "{fs::path_file(gdb)}: {e$message}"
-        ))
-        return(NULL)
-      }
-    )
+    lyr <- read_nhn_from_gdb(gdb, layer_name, group_id)
 
     if (is.null(lyr) || nrow(lyr) == 0) return(NULL)
 
-    # Clip to AOI to reduce memory footprint before merging
     clipped <- tryCatch(
       sf::st_intersection(lyr, aoi),
       error = function(e) {
@@ -383,13 +334,55 @@ read_merge_nhn_layer <- function(gdb_paths, layer_name, aoi, group_id) {
   if (length(layers_list) == 0) return(NULL)
 
   # Merge all sheets, keeping only geometry column to avoid attribute
-  # conflicts between GDB versions with differing schemas
+  # conflicts between GDB/SHP versions with differing schemas
   merged <- purrr::map(layers_list, function(lyr) {
     dplyr::select(lyr, geometry = dplyr::last_col())
   }) |>
     dplyr::bind_rows()
 
   merged
+}
+
+# -- NHN format-specific readers --------------------------------------------
+
+#' Read an NHN layer from a GDB folder
+#' @param gdb_path   Character. Path to .gdb folder
+#' @param layer_name Character. Layer name to read
+#' @param group_id   Character. Group identifier (for log messages)
+#' @return sf object in EPSG:3979, or NULL on failure
+read_nhn_from_gdb <- function(gdb_path, layer_name, group_id) {
+
+  available_layers <- tryCatch(
+    sf::st_layers(gdb_path)$name,
+    error = function(e) {
+      cw_warn(glue::glue(
+        "Group '{group_id}': could not read layers from ",
+        "{fs::path_file(gdb_path)}: {e$message}"
+      ))
+      return(character(0))
+    }
+  )
+
+  if (!layer_name %in% available_layers) {
+    cw_warn(glue::glue(
+      "Group '{group_id}': layer '{layer_name}' not found in ",
+      "{fs::path_file(gdb_path)} — skipping."
+    ))
+    return(NULL)
+  }
+
+  tryCatch(
+    sf::st_read(gdb_path, layer = layer_name, quiet = TRUE) |>
+      sf::st_zm(drop = TRUE, what = "ZM") |>
+      sf::st_transform(3979),
+    error = function(e) {
+      cw_warn(glue::glue(
+        "Group '{group_id}': error reading '{layer_name}' from ",
+        "{fs::path_file(gdb_path)}: {e$message}"
+      ))
+      NULL
+    }
+  )
 }
 
 # -- Stream burning ----------------------------------------------------------
@@ -419,24 +412,55 @@ burn_streams_into_dem <- function(
 
   # Write flowlines to a temporary shapefile in the group cache directory.
   # WhiteboxTools only accepts .shp for vector inputs, not .gpkg.
-  # st_zm() drops M/Z dimensions which cause a Rust panic in WhiteboxTools.
   streams_shp <- fs::path(fs::path_dir(dem_path), "streams_tmp.shp")
+
+  # -- Filter boundary-crossing stream features ------------------------------
+  # NHN features that cross or exit the DEM extent cause wbt_fill_burn to
+  # carve anomalously large negative values (e.g. -10000) because WhiteboxTools
+  # has no valid downstream context for those segments and enforces drainage
+  # continuity by carving to extreme depths.
+  # Fix: remove features not fully contained within a 2-cell (60 m) inset of
+  # the DEM extent. This is standard preprocessing applied to every group.
+  dem_rast           <- terra::rast(dem_path)
+  dem_boundary_inset <- terra::buffer(
+    terra::as.polygons(terra::ext(dem_rast), crs = terra::crs(dem_rast)),
+    width = -60
+  )
+
+  # Cast to LINESTRING and drop M/Z before converting to SpatVector —
+  # WhiteboxTools requires single-part LINESTRING geometry
+  flowlines_lines <- flowlines |>
+    sf::st_zm(drop = TRUE, what = "ZM") |>
+    sf::st_cast("LINESTRING", warn = FALSE)
+
+  flowlines_vect <- terra::vect(flowlines_lines)
+  n_before       <- length(flowlines_vect)
+
+  # terra::relate() returns a matrix — convert to logical vector for subsetting
+  within_mat     <- terra::relate(flowlines_vect, dem_boundary_inset,
+                                  relation = "within")
+  within_idx     <- as.logical(within_mat[, 1])
+  flowlines_clipped <- flowlines_vect[within_idx, ]
+  n_after        <- length(flowlines_clipped)
+
+  if (n_after < n_before) {
+    cw_inform(glue::glue(
+      "Group '{group_id}': removed {n_before - n_after} boundary-crossing ",
+      "stream feature(s) before burn ({n_after} remaining)."
+    ))
+  }
+
+  if (n_after == 0) {
+    cw_warn(glue::glue(
+      "Group '{group_id}': no stream features remain after boundary filter. ",
+      "Skipping burn — dem.tif will be used as-is for Whitebox steps."
+    ))
+    return(invisible(dem_burned_path))
+  }
 
   cw_inform(glue::glue("Group '{group_id}': writing temporary streams shapefile..."))
 
-  # Cast all geometries to MULTILINESTRING before writing. Mixing LINESTRING
-  # and MULTILINESTRING across NHN GDB work units produces an unrecognized
-  # ShapeType (16908288) that causes a Rust panic in WhiteboxTools. Casting
-  # everything to MULTILINESTRING ensures a uniform geometry type.
-  # st_zm() drops M/Z coordinate dimensions which shapefiles do not support.
-  flowlines |>
-    sf::st_zm(drop = TRUE, what = "ZM") |>
-    sf::st_cast("MULTILINESTRING") |>
-    sf::st_write(
-      streams_shp,
-      delete_dsn = TRUE,
-      quiet      = TRUE
-    )
+  terra::writeVector(flowlines_clipped, streams_shp, overwrite = TRUE)
 
   cw_inform(glue::glue("Group '{group_id}': burning streams into DEM..."))
 
