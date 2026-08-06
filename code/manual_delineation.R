@@ -62,8 +62,8 @@ inuvik_dem <- crop(
   mask(inuvik)
 
 plot(inuvik_dem)
-writeRaster(inuvik_dem, here("testing/BNWT1/dem.tif"), overwrite = T)
-writeRaster(inuvik_dem, here("testing/CW-S-07/dem.tif"), overwrite = T)
+writeRaster(inuvik_dem, here("testing/BNWT1/dem.tif"), overwrite = TRUE)
+writeRaster(inuvik_dem, here("testing/CW-S-07/dem.tif"), overwrite = TRUE)
 
 sask_dem <- crop(
   mrdem,
@@ -71,15 +71,15 @@ sask_dem <- crop(
 ) |>
   mask(sask)
 plot(sask_dem)
-writeRaster(sask_dem, here("testing/PHPP05/dem.tif"), overwrite = T)
+writeRaster(sask_dem, here("testing/PHPP05/dem.tif"), overwrite = TRUE)
 
 gaspe_dem <- crop(
   mrdem,
   gaspe
 ) |>
   mask(gaspe)
-writeRaster(gaspe_dem, here("testing/L09/dem.tif"), overwrite = T)
-writeRaster(gaspe_dem, here("testing/L10/dem.tif"), overwrite = T)
+writeRaster(gaspe_dem, here("testing/L09/dem.tif"), overwrite = TRUE)
+writeRaster(gaspe_dem, here("testing/L10/dem.tif"), overwrite = TRUE)
 
 nfld_dem <- crop(
   mrdem,
@@ -87,7 +87,7 @@ nfld_dem <- crop(
 ) |>
   mask(nfld)
 plot(nfld_dem)
-writeRaster(nfld_dem, here("testing/HB1/dem.tif"), overwrite = T)
+writeRaster(nfld_dem, here("testing/HB1/dem.tif"), overwrite = TRUE)
 
 
 nhn <- vect(
@@ -228,15 +228,15 @@ sas_rivs <- get_nhn_streams(nhn_sask, sask)
 plot(inu_rivs)
 plot(sas_rivs)
 
-writeVector(inu_rivs, here("testing/BNWT1/stream_tmp.shp"), overwrite = T)
-writeVector(sas_rivs, here("testing/PHPP05/stream_tmp.shp"), overwrite = T)
+writeVector(inu_rivs, here("testing/BNWT1/stream_tmp.shp"), overwrite = TRUE)
+writeVector(sas_rivs, here("testing/PHPP05/stream_tmp.shp"), overwrite = TRUE)
 
 
 wbt_fill_burn(
   dem = here("testing/PHPP05/dem.tif"),
   streams = here("testing/PHPP05/stream_tmp.shp"),
   output = here("testing/PHPP05/dem_burned.tif"),
-  verbose_mode = T
+  verbose_mode = TRUE
 )
 
 wbt_breach_depressions_least_cost(
