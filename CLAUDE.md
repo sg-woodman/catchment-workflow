@@ -14,14 +14,19 @@ All code is plain R scripts sourced interactively — there is no build system, 
 
 ## Running the workflow
 
-The top-level runner is `code/delineate_catchments.R`. It is sourced interactively in R (or run section-by-section), not executed as a CLI script.
+There is one runner per project, both on the shared `workflow/` layout:
+
+- `workflow/run_celeste.R` — CELESTE stream/river sites
+- `workflow/run_cam_lakes.R` — CAM lake sites
+
+Each is sourced interactively in R (or run section-by-section), not executed as a CLI script.
 
 ```r
 # From an R session in the project root:
-source("code/delineate_catchments.R")
+source("workflow/run_celeste.R")
 ```
 
-Before running, set the path variables near the top of that file (MRDEM VRT, NHN directory, NHN index shapefile, HydroBasins directory) and define your sites tibble.
+Before running, set the path variables near the top of that file (MRDEM VRT, NHN directory, NHN index shapefile, HydroBasins directory) and point it at your sites source.
 
 To reset outputs selectively before a rerun:
 
@@ -36,7 +41,7 @@ reset_all()                    # everything
 To rerun watershed delineation for a single site after editing its pour point in QGIS:
 
 ```r
-source("R/99_rerun_sites")     # defines rerun_site_watershed()
+source("workflow/R/stream/99_rerun_sites")     # defines rerun_site_watershed()
 rerun_site_watershed("site_id", sites, group_manifest, output_dir)
 ```
 
@@ -49,19 +54,26 @@ Processing is split into **groups** (hydrologically coherent regions sharing a D
 - A **group** is identified by `group_id` in the sites table. All sites sharing a group share a DEM crop and all WhiteboxTools outputs.
 - A **site** is a single pour point. Multiple sites can share a group if they fall within the same HydroBasins level-6 polygon(s).
 
-### Module sequence (`R/`)
+### Module sequence (`workflow/R/`)
+
+Stream/river-specific modules live in `workflow/R/stream/`; lake-specific modules in `workflow/R/lake/`. `utils.R` and Stages 06–08 are shared by both pipelines.
 
 | File | Purpose |
 |---|---|
 | `utils.R` | Logging (`cw_inform/warn/abort`), site validation, AOI construction, file-system helpers |
-| `01_group_sites.R` | Builds the `group_manifest` sf tibble; creates `cache/<group_id>/` and `output/<site_id>/` directories |
-| `02_prepare_dem.R` | Crops MRDEM VRT to each group AOI → `cache/<group_id>/dem.tif` |
-| `03_burn_streams.R` | Reads NHN GDB files, merges flowlines/waterbodies, optionally burns streams into DEM → `flowlines.gpkg`, `waterbodies.gpkg`, `dem_burned.tif` |
-| `04_run_whitebox.R` | Breach → D8 pointer → accumulation → stream extraction → hillshade → `dem_breached.tif`, `flow_pointer.tif`, `flow_accum.tif`, `streams.tif`, `hillshade.tif` |
-| `05_delineate_sites.R` | Snap pour point → watershed delineation → polygon conversion → clip all group rasters to each catchment → per-site outputs |
-| `06_remove_upstream.R` | For nested sites: erases smaller upstream catchments from larger downstream ones → `catchment_clipped.gpkg` |
-| `07_reclip_outputs.R` | Re-clips all rasters and flowlines to the clipped catchment polygon → `*_clipped.tif` / `streams_clipped.gpkg` |
-| `06_catchment_metrics.R` / `08_catchment_metrics.R` | Computes geometry, areal, and relief morphometric metrics following Shekar & Mathew (2024). `08_` computes both unclipped and clipped versions. |
+| `stream/01_group_sites.R` | Builds the `group_manifest` sf tibble; creates `cache/<group_id>/` and `output/<site_id>/` directories |
+| `stream/02_prepare_dem.R` | Crops MRDEM VRT to each group AOI → `cache/<group_id>/dem.tif` |
+| `stream/03_burn_streams.R` | Reads NHN GDB files, merges flowlines/waterbodies, optionally burns streams into DEM → `flowlines.gpkg`, `waterbodies.gpkg`, `dem_burned.tif` |
+| `stream/04_run_whitebox.R` | Breach → D8 pointer → accumulation → stream extraction → hillshade → `dem_breached.tif`, `flow_pointer.tif`, `flow_accum.tif`, `streams.tif`, `hillshade.tif` |
+| `stream/05_delineate_sites.R` | Snap pour point → watershed delineation → polygon conversion → clip all group rasters to each catchment → per-site outputs |
+| `stream/99_rerun_sites` | Defines `rerun_site_watershed()` for fixing individual sites post-delineation without clearing the full group cache |
+| `06_remove_upstream.R` | For nested sites: erases smaller upstream catchments from larger downstream ones → `catchment_clipped.gpkg` (stream); analogous lake logic lives in `lake/04_remove_upstream_lakes.R` |
+| `07_reclip_outputs.R` | Re-clips all rasters and flowlines to the clipped catchment polygon → `*_clipped.tif` / `streams_clipped.gpkg`. Shared — works for stream (`group_manifest`) or lake (`cache_dir`) projects |
+| `08_catchment_metrics.R` | Computes geometry, areal, relief, and (when applicable) lake/stream morphometric metrics following Shekar & Mathew (2024), for both unclipped and clipped catchments |
+
+`workflow/R/lake/01-05` (match lake polygons → prepare OIH DEM → delineate → remove upstream → hydroweight attributes) are lake-only and used solely by `run_cam_lakes.R`.
+
+Migrated from a river-only `R/*.R` layout (retired 2026-08, verified equivalent via `workflow/verify_stream_migration.R`) — see git history if you need the old structure.
 
 ### The `group_manifest` object
 
@@ -100,6 +112,7 @@ When a catchment looks wrong, the pour point snapped to the wrong stream cell. T
 - **`burn_streams` is a group-level flag**, not per-site. All sites in a group must share the same value.
 - **HydroBasins region (na vs ar)** is resolved spatially by intersection with level-1 boundaries, not by latitude threshold.
 - **`99_rerun_sites`** is a script (no `.R` extension) that defines `rerun_site_watershed()` for fixing individual sites post-delineation without clearing the full group cache.
+- **`snap_pour_point()` always re-snaps from the raw point** — it has no cache check, so it will overwrite a manually-edited `pour_point_snapped.shp` if the normal delineation stage is rerun. Corrections must go through `rerun_site_watershed()`, which reads the edited `.shp` directly and skips snapping entirely.
 
 # Project Decisions & Context
 <!-- manually maintained — decisions from development history -->
@@ -113,20 +126,16 @@ quality modelling of post-industrial vegetation recovery in Sudbury, Ontario.
 Two study systems: CAM lakes (45 sites) and CELESTE/river sites.
 
 ## Project structure
-- `workflow/run_cam_lakes.R`                    — ACTIVE top-level runner (Stages 1–7)
-- `workflow/R/lake/05_hydroweight_attributes.R` — ACTIVE hydroweight module (Stage 7)
-- `cam_workflow_lake.R`        — superseded by workflow/run_cam_lakes.R
-- `upstream_clipping_lake.R`   — superseded by workflow/R/lake/04_remove_upstream_lakes.R
-- `hydroweight_cam_canlcc.R`   — superseded by workflow/R/lake/05_hydroweight_attributes.R
-- `hydroweight_debug.R`        — Diagnostic script for hydroweight
-- `05_delineate_sites.R`       — River site delineation
-- `06_remove_upstream.R`       — River upstream clipping
-- `07_reclip_outputs.R`        — River reclip outputs to clipped catchment
-- `08_catchment_metrics.R`     — Morphometric metrics (clipped + unclipped)
-- `cam_workflow.R`             — SUPERSEDED point-based version, do not use
-- `upstream_clipping.R`        — SUPERSEDED, do not use
-- `hydroweight_cam.R`          — SUPERSEDED OLCC version, do not use
-- `upstream_network_test.R`    — Experimental, abandoned
+- `workflow/run_cam_lakes.R`                    — ACTIVE top-level runner for CAM lakes (Stages 1–7)
+- `workflow/run_celeste.R`                      — ACTIVE top-level runner for CELESTE stream sites (Stages 1–8)
+- `workflow/R/lake/05_hydroweight_attributes.R` — ACTIVE hydroweight module (lake Stage 7)
+- `workflow/R/stream/05_delineate_sites.R`      — River/stream site delineation
+- `workflow/R/06_remove_upstream.R`             — River upstream clipping (shared module)
+- `workflow/R/07_reclip_outputs.R`              — Reclip outputs to clipped catchment (shared, stream + lake)
+- `workflow/R/08_catchment_metrics.R`           — Morphometric metrics, clipped + unclipped (shared, stream + lake)
+- `R/*.R`, `code/delineate_catchments.R`        — SUPERSEDED (retired 2026-08) by the workflow/ layout above
+- `hydroweight_debug.R`                         — Diagnostic script for hydroweight
+- `upstream_network_test.R`                     — Experimental, abandoned
 
 ## CRS
 EPSG:3161 (NAD83 / Ontario MNR Lambert) throughout — OIH native CRS.
