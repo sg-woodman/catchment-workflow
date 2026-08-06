@@ -9,6 +9,9 @@ data/processed/cache/
 /output/
 /testing/
 
+# Scratch / exploratory outputs (rasters, one-off gpkg, reference docs)
+/tmp/
+
 # History files
 .Rhistory
 .Rapp.history
