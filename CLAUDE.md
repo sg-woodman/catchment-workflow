@@ -67,9 +67,21 @@ Stream/river-specific modules live in `workflow/R/stream/`; lake-specific module
 | `stream/04_run_whitebox.R` | Breach → D8 pointer → accumulation → stream extraction → hillshade → `dem_breached.tif`, `flow_pointer.tif`, `flow_accum.tif`, `streams.tif`, `hillshade.tif` |
 | `stream/05_delineate_sites.R` | Snap pour point → watershed delineation → polygon conversion → clip all group rasters to each catchment → per-site outputs |
 | `stream/99_rerun_sites` | Defines `rerun_site_watershed()` for fixing individual sites post-delineation without clearing the full group cache |
+| `stream/06_hydroweight_attributes.R` | Distance-weighted catchment attributes (hydroweight), pour point as the O-scheme target, for both catchment versions. Analogous lake logic (lake polygon as O target) lives in `lake/05_hydroweight_attributes.R` |
 | `06_remove_upstream.R` | For nested sites: erases smaller upstream catchments from larger downstream ones → `catchment_clipped.gpkg` (stream); analogous lake logic lives in `lake/04_remove_upstream_lakes.R` |
 | `07_reclip_outputs.R` | Re-clips all rasters and flowlines to the clipped catchment polygon → `*_clipped.tif` / `streams_clipped.gpkg`. Shared — works for stream (`group_manifest`) or lake (`cache_dir`) projects |
 | `08_catchment_metrics.R` | Computes geometry, areal, relief, and (when applicable) lake/stream morphometric metrics following Shekar & Mathew (2024), for both unclipped and clipped catchments |
+
+### Hydroweight (distance-weighted catchment attributes)
+
+Both projects use the `hydroweight` package to compute inverse-distance-weighted landscape attributes (e.g. % land cover, mean NDVI) under seven weighting schemes (`lumped`, `iEucO`, `iFLO`, `HAiFLO`, `iEucS`, `iFLS`, `HAiFLS`). The two pipelines differ only in what the "O" (outflow) target is:
+
+- **Lake** (`lake/05_hydroweight_attributes.R`): `target_O` = the lake polygon. `remove_region` excises the lake's own footprint from LOI summaries (it has area). Uses one project-wide DEM/flow accumulation raster (single contiguous region).
+- **Stream** (`stream/06_hydroweight_attributes.R`): `target_O` = the site's pour point (`output/<site_id>/pour_point.gpkg`) — a point has no `remove_region`. DEM/flow accumulation are resolved **per site from that site's group cache** (`cache_dir/<group_id>/`), since CELESTE groups span separate HydroBasins regions with independent DEMs. Runs for both `catchment.gpkg` and `catchment_clipped.gpkg`, tagged by a `version` column.
+
+`loi_layers` descriptors support either a single project-wide raster (`path`) or a pre-clipped-per-site raster (`path_template`, containing a literal `"{site_id}"` placeholder) — the stream module resolves the latter lazily per site. A per-site raster only needs to cover the unclipped catchment extent; the clipped-version pass crops it down further.
+
+`workflow/raster_attributes.R` is a standalone, pipeline-independent utility (not sourced into either project's Stage sequence by default) for preparing LOI rasters ahead of time: `reclassify_categorical()` collapses/relabels raw categorical codes via a lookup table, and `sens_slope_trend()` computes a per-pixel Theil-Sen slope + Mann-Kendall p-value across a raster time-series stack (e.g. annual NDVI) — deliberately without autocorrelation prewhitening (Yue-Pilon/Zhang), which was tested and found to meaningfully distort slope magnitude on short/noisy series; see the function's docstring for the empirical comparison.
 
 `workflow/R/lake/01-05` (match lake polygons → prepare OIH DEM → delineate → remove upstream → hydroweight attributes) are lake-only and used solely by `run_cam_lakes.R`.
 
@@ -127,8 +139,10 @@ Two study systems: CAM lakes (45 sites) and CELESTE/river sites.
 
 ## Project structure
 - `workflow/run_cam_lakes.R`                    — ACTIVE top-level runner for CAM lakes (Stages 1–7)
-- `workflow/run_celeste.R`                      — ACTIVE top-level runner for CELESTE stream sites (Stages 1–8)
-- `workflow/R/lake/05_hydroweight_attributes.R` — ACTIVE hydroweight module (lake Stage 7)
+- `workflow/run_celeste.R`                      — ACTIVE top-level runner for CELESTE stream sites (Stages 1–9)
+- `workflow/R/lake/05_hydroweight_attributes.R` — ACTIVE hydroweight module (lake Stage 7), target_O = lake polygon
+- `workflow/R/stream/06_hydroweight_attributes.R` — ACTIVE hydroweight module (stream Stage 9), target_O = pour point
+- `workflow/raster_attributes.R`                — Standalone LOI prep utility: reclassify_categorical(), sens_slope_trend()
 - `workflow/R/stream/05_delineate_sites.R`      — River/stream site delineation
 - `workflow/R/06_remove_upstream.R`             — River upstream clipping (shared module)
 - `workflow/R/07_reclip_outputs.R`              — Reclip outputs to clipped catchment (shared, stream + lake)
