@@ -24,6 +24,9 @@
 #   Stage 6 — Remove upstream nested catchments (clipping)
 #   Stage 7 — Re-clip rasters and flowlines to clipped catchments
 #   Stage 8 — Catchment morphometric metrics (clipped + unclipped)
+#   Stage 9 — Distance-weighted catchment attributes (hydroweight), for both
+#              catchment versions, using the pour point as the O-scheme
+#              target (see workflow/R/stream/06_hydroweight_attributes.R)
 #
 # CACHING:
 #   Group-level rasters (DEM, breached DEM, flow products) are cached in
@@ -62,10 +65,12 @@ source(here("workflow/R/stream/03_burn_streams.R"))
 source(here("workflow/R/stream/04_run_whitebox.R"))
 source(here("workflow/R/stream/05_delineate_sites.R"))
 source(here("workflow/R/stream/99_rerun_sites"))
+source(here("workflow/R/stream/06_hydroweight_attributes.R"))
 source(here("workflow/R/06_remove_upstream.R"))
 source(here("workflow/R/07_reclip_outputs.R"))
 source(here("workflow/R/08_catchment_metrics.R"))
 source(here("code/reset_workflow.R"))
+source(here("workflow/raster_attributes.R")) # reclassify_categorical(), sens_slope_trend() — used ad hoc to prepare LOI rasters below, not part of Stages 1-9
 
 # =============================================================================
 # CONFIGURATION
@@ -244,6 +249,62 @@ write_metrics_outputs(
   output_dir = output_dir
 )
 print(metrics)
+
+# =============================================================================
+# STAGE 9 (optional) — Distance-weighted catchment attributes (hydroweight)
+# =============================================================================
+# Comment out if hydroweight attributes are not needed for this project.
+#
+# LOI (layer of interest) rasters live under data/celeste_loi/:
+#   - Project-wide layers (one raster covering the full site extent):
+#       data/celeste_loi/<layer_name>.tif           -> loi_layers[[i]]$path
+#   - Per-catchment-clipped layers (already cropped, one file per site — the
+#     file only needs to cover the UNCLIPPED catchment; the clipped-version
+#     pass crops it down further):
+#       data/celeste_loi/<layer_name>/{site_id}.tif  -> $path_template
+#
+# To reclassify a raw categorical raster or derive a Sen's-slope trend
+# raster from a time-series stack before adding it below, see
+# workflow/raster_attributes.R (reclassify_categorical(), sens_slope_trend()) —
+# e.g.:
+#   ndvi_stack <- terra::rast(here("data/celeste_loi_raw/ndvi_annual.tif"))
+#   ndvi_trend <- sens_slope_trend(ndvi_stack, x = 2010:2024)
+#   terra::writeRaster(ndvi_trend, here("data/celeste_loi/ndvi_trend.tif"))
+
+loi_layers <- list(
+  list(
+    path = here("data/celeste_loi/landcover.tif"),
+    name = "landcover",
+    type = "categorical"
+    # class_levels = data.frame(ID = c(...), Class = c(...))  # optional
+  ),
+  list(
+    path = here("data/celeste_loi/ndvi_trend.tif"),
+    name = "ndvi_trend",
+    type = "continuous"
+  ),
+  list(
+    path_template = here("data/celeste_loi/ndvi_clipped/{site_id}.tif"),
+    name = "ndvi_clipped",
+    type = "continuous"
+  )
+)
+
+hw_results <- calculate_hydroweight_attributes_stream(
+  sites = sites,
+  group_manifest = group_manifest,
+  output_dir = output_dir,
+  cache_dir = cache_dir,
+  loi_layers = loi_layers,
+  catchment_versions = c("unclipped", "clipped")
+)
+
+write_csv(
+  hw_results,
+  here("output", PROJECT_ID, paste0(PROJECT_ID, "_hydroweight.csv"))
+)
+
+print(hw_results)
 
 # =============================================================================
 # One-off: rebuilding data/celeste_milli_sites_clean.gpkg from a new export
