@@ -168,20 +168,23 @@ calculate_hydroweight_attributes_stream <- function(
 
 # -- LOI validation and preparation -------------------------------------------
 
-#' Validate loi_layers list structure (stream variant: path OR path_template)
+#' Validate loi_layers list structure (stream variant: path / path_template /
+#' path_lazy — exactly one)
 validate_loi_layers_stream <- function(loi_layers) {
   for (i in seq_along(loi_layers)) {
     lyr <- loi_layers[[i]]
     lbl <- if (!is.null(lyr$name)) lyr$name else paste0("layer ", i)
 
     # NOTE: use [[ (exact) not $ (partial-matches "path" against
-    # "path_template" on a list — a real bug caught during testing)
+    # "path_template"/"path_lazy" on a list — a real bug caught during
+    # testing)
     has_path <- !is.null(lyr[["path"]])
     has_template <- !is.null(lyr[["path_template"]])
-    if (has_path == has_template) {
+    has_lazy <- !is.null(lyr[["path_lazy"]])
+    if (sum(has_path, has_template, has_lazy) != 1) {
       cw_abort(glue::glue(
-        "loi_layers[[{i}]] ({lbl}): exactly one of 'path' or 'path_template' ",
-        "must be set."
+        "loi_layers[[{i}]] ({lbl}): exactly one of 'path', 'path_template', ",
+        "or 'path_lazy' must be set."
       ))
     }
     if (has_template && !grepl("\\{site_id\\}", lyr[["path_template"]])) {
@@ -191,6 +194,9 @@ validate_loi_layers_stream <- function(loi_layers) {
     }
     if (has_path && !cache_exists(lyr[["path"]])) {
       cw_abort(glue::glue("loi_layers[[{i}]] ({lbl}): file not found — {lyr[['path']]}"))
+    }
+    if (has_lazy && !cache_exists(lyr[["path_lazy"]])) {
+      cw_abort(glue::glue("loi_layers[[{i}]] ({lbl}): file not found — {lyr[['path_lazy']]}"))
     }
     if (is.null(lyr$type) || !lyr$type %in% c("categorical", "continuous")) {
       cw_abort(glue::glue(
@@ -213,20 +219,20 @@ validate_loi_layers_stream <- function(loi_layers) {
 #' Prepare project-wide LOI rasters (path-based layers only)
 #'
 #' Mirrors workflow/R/lake/05_hydroweight_attributes.R's prepare_loi_layers().
-#' Layers declared with path_template (per-site) are left NULL here — they're
-#' resolved lazily per site in resolve_site_loi_raster().
+#' Layers declared with path_template or path_lazy (both resolved per site)
+#' are left NULL here — see resolve_site_loi_raster().
 #'
 #' @param loi_layers Validated list of LOI layer descriptors
 #' @param cache_dir  Character. Project cache directory
 #' @param raster_crs Character. Target CRS
 #' @return Named list, one element per LOI layer: a prepared SpatRaster for
-#'   path-based layers, or NULL for path_template-based layers
+#'   path-based layers, or NULL for path_template/path_lazy-based layers
 prepare_loi_layers_stream <- function(loi_layers, cache_dir, raster_crs) {
   hw_cache_dir <- fs::path(cache_dir, "hydroweight_loi")
   fs::dir_create(hw_cache_dir, recurse = TRUE)
 
   purrr::map(loi_layers, function(lyr) {
-    if (!is.null(lyr[["path_template"]])) {
+    if (!is.null(lyr[["path_template"]]) || !is.null(lyr[["path_lazy"]])) {
       return(NULL)
     }
     prepare_one_loi_raster(
@@ -240,18 +246,39 @@ prepare_loi_layers_stream <- function(loi_layers, cache_dir, raster_crs) {
   }) |> setNames(purrr::map_chr(loi_layers, "name"))
 }
 
-#' Resolve (reproject/cache, apply levels) one per-site LOI raster
+#' Resolve (crop, reproject/cache, apply levels) one per-site LOI raster
 #'
-#' @param loi_desc  LOI layer descriptor with path_template
-#' @param site_id   Character. Site identifier
-#' @param cache_dir Character. Project cache directory
-#' @param raster_crs Character. Target CRS
+#' Handles both per-site source shapes:
+#'   path_template — one real file per site (already small; no crop needed
+#'     before caching).
+#'   path_lazy     — one shared source too large to materialize whole (e.g.
+#'     a VRT mosaicing scattered regional tiles) — cropped to the site's
+#'     catchment (in the source's own CRS, buffered) BEFORE reprojecting/
+#'     caching, so only a small per-catchment piece is ever written to disk
+#'     or passed through terra::project(). See build_mosaic_vrt() in
+#'     workflow/raster_attributes.R for why the source must have its nodata
+#'     set correctly first — otherwise areas outside every source tile
+#'     silently read as 0, not NA.
+#'
+#' @param loi_desc     LOI layer descriptor with path_template or path_lazy
+#' @param site_id      Character. Site identifier
+#' @param catchment_sf sf polygon. The site's catchment (current version),
+#'   used to crop path_lazy sources. Ignored for path_template.
+#' @param cache_dir    Character. Project cache directory
+#' @param raster_crs   Character. Target CRS
 #' @return SpatRaster, or NULL if the site's raster file doesn't exist
-resolve_site_loi_raster <- function(loi_desc, site_id, cache_dir, raster_crs) {
-  raw_path <- gsub("\\{site_id\\}", site_id, loi_desc[["path_template"]])
+resolve_site_loi_raster <- function(loi_desc, site_id, catchment_sf, cache_dir, raster_crs) {
+  is_lazy <- !is.null(loi_desc[["path_lazy"]])
+  raw_path <- if (is_lazy) {
+    loi_desc[["path_lazy"]]
+  } else {
+    gsub("\\{site_id\\}", site_id, loi_desc[["path_template"]])
+  }
+
   if (!cache_exists(raw_path)) {
     cw_warn(glue::glue(
-      "Site '{site_id}', LOI '{loi_desc$name}': per-site raster not found — {raw_path}"
+      "Site '{site_id}', LOI '{loi_desc$name}': ",
+      "{if (is_lazy) 'path_lazy source' else 'per-site raster'} not found — {raw_path}"
     ))
     return(NULL)
   }
@@ -266,22 +293,43 @@ resolve_site_loi_raster <- function(loi_desc, site_id, cache_dir, raster_crs) {
     type         = loi_desc$type,
     class_levels = loi_desc$class_levels,
     raster_crs   = raster_crs,
-    label        = glue::glue("{loi_desc$name} [{site_id}]")
+    label        = glue::glue("{loi_desc$name} [{site_id}]"),
+    crop_to      = if (is_lazy) catchment_sf else NULL
   )
 }
 
 #' Shared reprojection/caching/factor-level logic for one LOI raster
+#'
+#' @param crop_to Optional sf polygon (any CRS). If supplied, the raw raster
+#'   is cropped to this geometry (transformed to the raster's own CRS,
+#'   buffered by crop_buffer_m) BEFORE reprojecting — critical for large/
+#'   lazy sources (e.g. a mosaic VRT spanning a huge, mostly-empty extent)
+#'   so terra::project()/writeRaster() only ever touch a small window.
+#' @param crop_buffer_m Numeric. Buffer applied to crop_to before cropping,
+#'   in crop_to's units (metres for a projected CRS). Guards against edge
+#'   pixels being lost to grid-rotation effects if raw and raster_crs
+#'   differ. Default 500.
 prepare_one_loi_raster <- function(
   raw_path,
   cache_path,
   type,
   class_levels,
   raster_crs,
-  label
+  label,
+  crop_to = NULL,
+  crop_buffer_m = 500
 ) {
   if (!cache_exists(cache_path)) {
     cw_inform(glue::glue("Preparing LOI '{label}' — reprojecting to {raster_crs}..."))
     raw <- terra::rast(raw_path)
+
+    if (!is.null(crop_to)) {
+      crop_geom <- crop_to |>
+        sf::st_transform(terra::crs(raw)) |>
+        sf::st_buffer(crop_buffer_m)
+      raw <- terra::crop(raw, terra::vect(crop_geom), snap = "out")
+    }
+
     if (!terra::same.crs(raw, raster_crs)) {
       method <- if (type == "categorical") "near" else "bilinear"
       raw <- terra::project(raw, raster_crs, method = method)
@@ -434,7 +482,7 @@ process_hw_site_stream <- function(
   attr_tables <- purrr::map(seq_along(loi_layers), function(i) {
     lyr_desc <- loi_layers[[i]]
     lyr_rast <- loi_prepared[[i]] %||%
-      resolve_site_loi_raster(lyr_desc, site_id, cache_dir, raster_crs)
+      resolve_site_loi_raster(lyr_desc, site_id, site_catch_sf, cache_dir, raster_crs)
 
     if (is.null(lyr_rast)) return(NULL)
 
