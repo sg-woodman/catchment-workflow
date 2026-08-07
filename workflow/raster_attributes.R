@@ -11,6 +11,9 @@
 #     into cleaner class groups via a from/to lookup table
 #   sens_slope_trend()       — per-pixel Theil-Sen slope + Mann-Kendall
 #     p-value across a raster time-series stack (e.g. annual NDVI composites)
+#   build_mosaic_vrt()       — mosaic scattered raster tiles (e.g. per-region
+#     NDVI exports) into one lightweight VRT, safe to pass as a hydroweight
+#     loi_layers `path_lazy` (see workflow/R/stream/06_hydroweight_attributes.R)
 #
 # Dependencies: terra, trend
 # =============================================================================
@@ -165,6 +168,92 @@ sens_slope_trend <- function(r, x = NULL, min_obs = 4, cores = 1) {
   out <- terra::app(r, fit_pixel, cores = cores)
   names(out) <- c("slope", "p_value")
   out
+}
+
+# -- Mosaic VRT construction ---------------------------------------------------
+
+#' Check that a set of raster tiles are safe to mosaic together
+#'
+#' A VRT does not reproject or reconcile mismatched inputs — it just points
+#' at pixel windows across files, assuming they share a common grid/CRS and
+#' (for multi-layer tiles) band structure. This reports per-file CRS,
+#' resolution, layer count, and first/last layer names so mismatches (e.g.
+#' one tile in a different CRS, or a shorter time series) are caught before
+#' build_mosaic_vrt(), not after.
+#'
+#' @param files Character vector of raster tile file paths.
+#' @return A tibble, one row per file, with columns: file, crs, res,
+#'   nlyr, first_layer, last_layer, and a logical `consistent` column
+#'   flagging rows that differ from the first file's crs/res/nlyr.
+check_tile_consistency <- function(files) {
+  info <- lapply(files, function(f) {
+    r <- terra::rast(f)
+    list(
+      file = basename(f),
+      crs = terra::crs(r, describe = TRUE)$name,
+      res = terra::res(r)[1],
+      nlyr = terra::nlyr(r),
+      first_layer = names(r)[1],
+      last_layer = names(r)[terra::nlyr(r)]
+    )
+  })
+  tbl <- do.call(rbind.data.frame, c(info, stringsAsFactors = FALSE))
+  tbl$consistent <- tbl$crs == tbl$crs[1] & tbl$res == tbl$res[1] & tbl$nlyr == tbl$nlyr[1]
+  tibble::as_tibble(tbl)
+}
+
+#' Mosaic scattered raster tiles into one VRT, with a nodata safety fix
+#'
+#' Thin wrapper around terra::vrt() for the common case of several
+#' non-overlapping (or partially overlapping) raster tiles — e.g. NDVI time-
+#' series exports done per region/group rather than one file covering the
+#' full site extent — that need to be readable as a single raster.
+#'
+#' By default, terra::vrt()/gdalbuildvrt leaves any area NOT covered by any
+#' input tile at the format's fill value (typically 0), NOT NoData. This is
+#' a real correctness hazard: cropping/masking that area for a site whose
+#' catchment falls outside every tile's coverage returns valid-looking
+#' zeros indistinguishable from real data, rather than failing or returning
+#' NA (confirmed directly: a VRT built from CELESTE's data/ndvi/*.tif tiles,
+#' which do not cover the NBE group at all, returned exactly 0 for every
+#' NBE catchment until this fix was applied). This function always passes
+#' `-vrtnodata` so uncovered areas correctly read as NA, letting
+#' the existing "all NA after crop/mask" checks in the hydroweight modules
+#' catch and skip them instead of silently computing wrong results.
+#'
+#' Does NOT reproject or align band/year structure across input tiles — all
+#' inputs must already share a common CRS, resolution, and (for multi-layer
+#' tiles) identical band count/order. Verify this first (e.g. loop
+#' terra::rast() over the files and compare crs()/res()/nlyr()/names()); a
+#' VRT cannot correct for mismatches between its source files.
+#'
+#' @param files    Character vector of raster tile file paths.
+#' @param vrt_path Character. Output .vrt file path.
+#' @param nodata   Value to use for both the vrtnodata safety fix and (if not
+#'   already set on the sources) srcnodata. Default "nan", matching typical
+#'   float raster NoData. Use a numeric sentinel instead if your tiles are
+#'   an integer type without a NaN representation.
+#' @param overwrite Logical. Overwrite vrt_path if it exists. Default TRUE.
+#'
+#' @return SpatRaster (the VRT, opened) — the mosaic will not be
+#'   materialized to disk except at vrt_path (a lightweight XML pointer);
+#'   later crop()/project() calls only read the pixels they need from the
+#'   underlying tiles.
+build_mosaic_vrt <- function(files, vrt_path, nodata = "nan", overwrite = TRUE) {
+  missing_files <- files[!file.exists(files)]
+  if (length(missing_files) > 0) {
+    stop(sprintf(
+      "File(s) not found: %s",
+      paste(missing_files, collapse = ", ")
+    ))
+  }
+
+  terra::vrt(
+    files,
+    filename = vrt_path,
+    options = c("-vrtnodata", as.character(nodata)),
+    overwrite = overwrite
+  )
 }
 
 # -- Null coalescing operator (mirrors standard R 4.4+ behaviour) ----
