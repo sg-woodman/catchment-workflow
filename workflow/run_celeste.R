@@ -255,21 +255,48 @@ print(metrics)
 # =============================================================================
 # Comment out if hydroweight attributes are not needed for this project.
 #
-# LOI (layer of interest) rasters live under data/celeste_loi/:
-#   - Project-wide layers (one raster covering the full site extent):
-#       data/celeste_loi/<layer_name>.tif           -> loi_layers[[i]]$path
-#   - Per-catchment-clipped layers (already cropped, one file per site — the
-#     file only needs to cover the UNCLIPPED catchment; the clipped-version
-#     pass crops it down further):
-#       data/celeste_loi/<layer_name>/{site_id}.tif  -> $path_template
+# LOI (layer of interest) rasters — three ways to declare a layer,
+# corresponding to the three fields loi_layers[[i]] can set (exactly one):
+#   $path          — a single raster already covering the full site extent
+#   $path_template — one pre-clipped raster per site, "{site_id}" placeholder
+#                    (only needs to cover the UNCLIPPED catchment; the
+#                    clipped-version pass crops it down further)
+#   $path_lazy     — one shared source too large to reproject/cache whole
+#                    (e.g. a mosaic VRT over scattered regional tiles) —
+#                    cropped to each site's catchment before ever being
+#                    reprojected or written to disk. See
+#                    workflow/R/stream/06_hydroweight_attributes.R's
+#                    resolve_site_loi_raster() for how this differs from
+#                    $path.
+#
+# NDVI (data/ndvi/*.tif): 12 regional tiles (COC, KEN1-4, MOR, NIP1-5, TUR),
+# 1984-2025 annual composites, all already EPSG:3979/30m/42-band-aligned
+# (verified with check_tile_consistency() — no reprojection or band
+# alignment needed). Mosaicked into one VRT via build_mosaic_vrt(), which
+# sets vrtnodata so areas outside every tile read as NA, not 0 — without
+# that fix a gap reads as valid-looking zeros indistinguishable from real
+# data. Used here via $path_lazy rather than $path because the 12 tiles'
+# combined bounding box is transcontinental (CELESTE sites span NWT,
+# Saskatchewan, Ontario, Quebec, Newfoundland) even though actual coverage
+# is small clustered patches — caching that whole extent as one file would
+# be enormous for no benefit.
+#
+# KNOWN GAP: the NBE group (20 sites) has no NDVI tile at all — confirmed
+# empirically (every NBE site's LOI crop is 100% NA after the vrtnodata
+# fix). Those sites are silently excluded from hw_results below (the
+# existing "all NA after crop/mask" check), not an error. Add an NBE tile
+# to data/ndvi/ once available and rerun.
 #
 # To reclassify a raw categorical raster or derive a Sen's-slope trend
 # raster from a time-series stack before adding it below, see
-# workflow/raster_attributes.R (reclassify_categorical(), sens_slope_trend()) —
-# e.g.:
-#   ndvi_stack <- terra::rast(here("data/celeste_loi_raw/ndvi_annual.tif"))
-#   ndvi_trend <- sens_slope_trend(ndvi_stack, x = 2010:2024)
-#   terra::writeRaster(ndvi_trend, here("data/celeste_loi/ndvi_trend.tif"))
+# workflow/raster_attributes.R (reclassify_categorical(), sens_slope_trend()).
+
+ndvi_vrt_path <- here("cache", PROJECT_ID, "hydroweight_loi", "ndvi_mosaic.vrt")
+dir_create(fs::path_dir(ndvi_vrt_path))
+build_mosaic_vrt(
+  files = list.files(here("data/ndvi"), pattern = "[.]tif$", full.names = TRUE),
+  vrt_path = ndvi_vrt_path
+)
 
 loi_layers <- list(
   list(
@@ -279,13 +306,8 @@ loi_layers <- list(
     # class_levels = data.frame(ID = c(...), Class = c(...))  # optional
   ),
   list(
-    path = here("data/celeste_loi/ndvi_trend.tif"),
-    name = "ndvi_trend",
-    type = "continuous"
-  ),
-  list(
-    path_template = here("data/celeste_loi/ndvi_clipped/{site_id}.tif"),
-    name = "ndvi_clipped",
+    path_lazy = ndvi_vrt_path,
+    name = "ndvi",
     type = "continuous"
   )
 )
