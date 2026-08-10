@@ -298,12 +298,14 @@ build_mosaic_vrt <- function(files, vrt_path, nodata = "nan", overwrite = TRUE) 
 #'   Default: every year present across all buckets' `year_field` values
 #'   within `crop_to` (if supplied) — i.e. computed from the data itself.
 #' @param crop_to    sf/SpatVector (any CRS) to spatially filter source
-#'   layers via a pushed-down query before reading — e.g. a group AOI.
-#'   Strongly recommended for province/national-scale sources (this is the
-#'   vector-data equivalent of `path_lazy`'s crop-before-reproject: without
-#'   it, every layer is read in full). Buffered by crop_buffer_m.
-#' @param crop_buffer_m Numeric. Buffer applied to crop_to, in crop_to's own
-#'   units. Default 1000.
+#'   layers to — e.g. a group AOI. Recommended for province/national-scale
+#'   sources so the rest of the pipeline only deals with the relevant
+#'   subset. Buffered by crop_buffer_m. NOT pushed down to OGR at read
+#'   time (deliberately — see below); every layer is read in full, then
+#'   filtered in R after geometry cleanup.
+#' @param crop_buffer_m Numeric. Buffer applied to crop_to (after
+#'   transforming it to `template`'s CRS), in that CRS's units (metres for
+#'   every CRS used in this project). Default 1000.
 #'
 #' @return SpatRaster: one layer per year in `years` (named "y<year>") plus
 #'   one "combined" layer, integer-coded — 0 = none of the buckets ("other"),
@@ -332,21 +334,28 @@ rasterize_competing_classes <- function(
     src <- if (is_bare_layer) gdb_path else layer_ref
     lyr <- if (is_bare_layer) layer_ref else NULL
 
-    wkt_filter <- NA_character_
-    if (!is.null(crop_to)) {
-      src_crs <- sf::st_crs(sf::st_layers(src)$crs[[
-        if (is.null(lyr)) 1 else which(sf::st_layers(src)$name == lyr)
-      ]])
-      crop_geom <- crop_to |>
-        sf::st_transform(src_crs) |>
-        sf::st_buffer(crop_buffer_m)
-      wkt_filter <- sf::st_as_text(sf::st_geometry(crop_geom)[[1]])
-    }
-
-    x <- if (is.na(wkt_filter)) {
-      sf::st_read(src, layer = lyr, quiet = TRUE)
+    # NOT filtered at read time (wkt_filter / -spat), even though that
+    # would be faster for a province-scale source — deliberately, after a
+    # real, confirmed failure: wkt_filter is pushed down to OGR BEFORE any
+    # R-side geometry cleanup, and curved geometries (MULTISURFACE — the
+    # same issue rasterize_competing_classes() already casts away below)
+    # make that push-down unreliable. Confirmed on two real datasets, two
+    # different severities: Ontario's harvest gdb silently dropped some
+    # (not all) curved features near a filter boundary (a handful out of
+    # ~4100 province-wide); New Brunswick's gdb returned ZERO features for
+    # every crop_to tried, including a 100km buffer around a real site
+    # coordinate confirmed well inside the layer's own reported extent.
+    # Reading in full and filtering in R afterward, once geometries are
+    # already cleaned up, is slower but correct regardless of the source's
+    # curve usage.
+    # sf::st_read(src, layer = NULL, ...) is NOT the same as omitting
+    # `layer` — sf calls enc2utf8(layer) unconditionally internally, which
+    # errors on NULL ("argument is not a character vector"). Confirmed
+    # directly. Must branch, not just pass lyr through when it's NULL.
+    x <- if (is.null(lyr)) {
+      sf::st_read(src, quiet = TRUE)
     } else {
-      sf::st_read(src, layer = lyr, wkt_filter = wkt_filter, quiet = TRUE)
+      sf::st_read(src, layer = lyr, quiet = TRUE)
     }
 
     if (nrow(x) == 0) {
@@ -356,12 +365,29 @@ rasterize_competing_classes <- function(
       stop(sprintf("Layer '%s' has no field '%s'.", layer_ref, year_field))
     }
 
-    x |>
+    # Drop empty geometries before casting — a mix of MULTISURFACE (curve)
+    # and even one empty GEOMETRYCOLLECTION feature in the same column
+    # makes st_cast("MULTIPOLYGON") fail outright for the WHOLE column
+    # ("MULTISURFACE can only be converted into MULTIPOLYGON"), not just
+    # skip the bad feature. Confirmed directly against real data: New
+    # Brunswick's HarvHistory layer has 9 such empty-geometry records.
+    x <- x[!sf::st_is_empty(x), ]
+
+    x <- x |>
       dplyr::select(dplyr::all_of(year_field)) |>
       sf::st_cast("MULTIPOLYGON") |>
       sf::st_make_valid() |>
       sf::st_transform(terra::crs(template)) |>
       dplyr::filter(!is.na(.data[[year_field]]))
+
+    if (!is.null(crop_to) && nrow(x) > 0) {
+      crop_geom <- crop_to |>
+        sf::st_transform(terra::crs(template)) |>
+        sf::st_buffer(crop_buffer_m)
+      x <- sf::st_filter(x, crop_geom)
+    }
+
+    x
   }
 
   read_bucket <- function(layer_refs) {
