@@ -70,7 +70,9 @@ source(here("workflow/R/06_remove_upstream.R"))
 source(here("workflow/R/07_reclip_outputs.R"))
 source(here("workflow/R/08_catchment_metrics.R"))
 source(here("code/reset_workflow.R"))
-source(here("workflow/raster_attributes.R")) # reclassify_categorical(), sens_slope_trend() — used ad hoc to prepare LOI rasters below, not part of Stages 1-9
+source(here("workflow/raster_attributes.R")) # reclassify_categorical(), sens_slope_trend(), rasterize_competing_classes() — used ad hoc to prepare LOI rasters below, not part of Stages 1-9
+source(here("workflow/prepare_ndvi.R")) # prepare_ndvi_vrt() — NDVI (continuous) LOI prep, see Stage 9
+source(here("workflow/prepare_harvest_regen.R")) # prepare_harvest_regen_rasters() — Ontario harvest/regen (categorical) LOI prep, see Stage 9
 
 # =============================================================================
 # CONFIGURATION
@@ -269,92 +271,22 @@ print(metrics)
 #                    resolve_site_loi_raster() for how this differs from
 #                    $path.
 #
-# NDVI (data/ndvi/*.tif): 12 regional tiles (COC, KEN1-4, MOR, NIP1-5, TUR),
-# 1984-2025 annual composites, all already EPSG:3979/30m/42-band-aligned
-# (verified with check_tile_consistency() — no reprojection or band
-# alignment needed). Mosaicked into one VRT via build_mosaic_vrt(), which
-# sets vrtnodata so areas outside every tile read as NA, not 0 — without
-# that fix a gap reads as valid-looking zeros indistinguishable from real
-# data. Used here via $path_lazy rather than $path because the 12 tiles'
-# combined bounding box is transcontinental (CELESTE sites span NWT,
-# Saskatchewan, Ontario, Quebec, Newfoundland) even though actual coverage
-# is small clustered patches — caching that whole extent as one file would
-# be enormous for no benefit.
+# Each LOI's actual prep (source data, mosaicking/reprojection/
+# rasterization, temporal precedence, etc.) lives in its own workflow-
+# specific script, not here — that logic is exactly the part expected to
+# differ between projects, so it stays out of both this standardized
+# runner and the generic hydroweight module. This block just calls each
+# one and gets back a path to feed into loi_layers below.
 #
-# KNOWN GAP: the NBE group (20 sites) has no NDVI tile at all — confirmed
-# empirically (every NBE site's LOI crop is 100% NA after the vrtnodata
-# fix). Those sites are silently excluded from hw_results below (the
-# existing "all NA after crop/mask" check), not an error. Add an NBE tile
-# to data/ndvi/ once available and rerun.
+#   NDVI (continuous)        -> workflow/prepare_ndvi.R
+#   Harvest/regen (categorical, Ontario only) -> workflow/prepare_harvest_regen.R
 #
-# To reclassify a raw categorical raster or derive a Sen's-slope trend
-# raster from a time-series stack before adding it below, see
-# workflow/raster_attributes.R (reclassify_categorical(), sens_slope_trend()).
+# To add another LOI, write a similar prepare_*.R script (reusing
+# workflow/raster_attributes.R's generic helpers where they fit) and call
+# it here the same way.
 
-ndvi_vrt_path <- here("cache", PROJECT_ID, "hydroweight_loi", "ndvi_mosaic.vrt")
-dir_create(fs::path_dir(ndvi_vrt_path))
-build_mosaic_vrt(
-  files = list.files(here("data/ndvi"), pattern = "[.]tif$", full.names = TRUE),
-  vrt_path = ndvi_vrt_path
-)
-
-# Harvest/regen disturbance (Ontario only: shared_data/raw/harvest/
-# ontario_harvest.gdb). Only NIP, TUR, and KEN sites fall inside Ontario's
-# harvest-tracked extent (confirmed by real spatial-filter feature counts,
-# not just a bounding-box check) — COC/MOR/NBE sites get no coverage and
-# are silently excluded downstream (the same "all NA after crop/mask"
-# path as the NDVI/NBE gap).
-#
-# Rasterized once per group (not once for all of Ontario — like the NDVI
-# VRT, the combined extent across groups is far larger than actual site
-# coverage) via rasterize_competing_classes(): one band per AR_YEAR present
-# in the group's data, plus one "combined" (all-years) band. Two competing
-# classes, most-recent-AR_YEAR-wins where they'd otherwise overlap (ties —
-# which is EVERY within-year overlap, since a per-year band only ever
-# includes same-year features from both classes by construction — go to
-# whichever bucket is named LAST in `buckets` below; regen is last, so
-# regen wins ties, matching "harvested then regenerated -> regen" as the
-# more ecologically current state).
-#
-# CC-only for now (Harvest_CC02 + Harvest_CC17 = the full 2002-2024 clear-
-# cut record, two non-overlapping vintage exports of the same product).
-# To include seed-tree/selection and shelterwood harvest too, add
-# Harvest_SE02/17 and Harvest_SH02/17 to the harvest bucket below — no
-# other code changes needed.
-harvest_regen_groups <- c("NIP", "TUR", "KEN")
-ontario_harvest_gdb <- "~/Documents/cfs/shared_data/raw/harvest/ontario_harvest.gdb"
-
-for (grp in harvest_regen_groups) {
-  group_raster_path <- here(
-    "cache", PROJECT_ID, "hydroweight_loi", "harvest_regen", paste0(grp, ".tif")
-  )
-  if (cache_exists(group_raster_path)) next
-
-  dir_create(fs::path_dir(group_raster_path))
-  grp_aoi <- group_manifest[group_manifest$group_id == grp, ]
-  grp_template <- rast(here("cache", PROJECT_ID, grp, "dem_breached.tif"))
-
-  hr <- rasterize_competing_classes(
-    buckets = list(
-      harvest = c("Harvest_CC02", "Harvest_CC17"),
-      regen   = c("Regen_Seed", "Regen_Natural", "Regen_Plant")
-    ),
-    gdb_path = path.expand(ontario_harvest_gdb),
-    template = grp_template,
-    crop_to  = grp_aoi
-  )
-  writeRaster(
-    hr,
-    group_raster_path,
-    overwrite = TRUE,
-    datatype = "INT1U",
-    gdal = "PHOTOMETRIC=MINISBLACK" # avoid a real GDAL quirk: an
-    # exactly-3-band Byte GeoTIFF gets auto-tagged as RGB, silently
-    # renaming bands to red/green/blue on every subsequent read
-  )
-}
-
-harvest_regen_levels <- data.frame(ID = 0:2, Class = c("other", "harvest", "regen"))
+ndvi_vrt_path <- prepare_ndvi_vrt(cache_dir = cache_dir)
+prepare_harvest_regen_rasters(group_manifest, cache_dir = cache_dir)
 
 loi_layers <- list(
   list(
