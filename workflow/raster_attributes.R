@@ -14,8 +14,12 @@
 #   build_mosaic_vrt()       — mosaic scattered raster tiles (e.g. per-region
 #     NDVI exports) into one lightweight VRT, safe to pass as a hydroweight
 #     loi_layers `path_lazy` (see workflow/R/stream/06_hydroweight_attributes.R)
+#   rasterize_competing_classes() — rasterize several "class bucket" vector
+#     layers (e.g. harvest vs. regen disturbance polygons) into one
+#     categorical raster with temporal precedence between classes, one band
+#     per year plus one all-years-combined band
 #
-# Dependencies: terra, trend
+# Dependencies: terra, trend, sf
 # =============================================================================
 
 library(terra)
@@ -254,6 +258,191 @@ build_mosaic_vrt <- function(files, vrt_path, nodata = "nan", overwrite = TRUE) 
     options = c("-vrtnodata", as.character(nodata)),
     overwrite = overwrite
   )
+}
+
+# -- Competing-class disturbance rasterization ---------------------------------
+
+#' Rasterize competing "class bucket" vector layers with temporal precedence
+#'
+#' Built for cases like harvest vs. regeneration disturbance tracking: one or
+#' more vector layers represent each of several classes (e.g. every harvest-
+#' method layer -> "harvest", every regen-method layer -> "regen"), each
+#' feature tagged with a year, and the same location can appear in more than
+#' one class's source layers across time — most recent year wins. Produces
+#' one band per requested year plus one all-years-combined band, all using
+#' the identical precedence rule: a location's class is whichever bucket's
+#' MOST RECENT covering feature is latest; a per-year band only ever sees
+#' same-year features from every bucket, so ties there are the norm, not the
+#' exception (`buckets` order settles them — see below).
+#'
+#' Geometry hygiene: features are cast to MULTIPOLYGON (fixes mixed
+#' MULTIPOLYGON/MULTISURFACE layers — a real issue found in
+#' ontario_harvest.gdb's newer-vintage layers, which terra::vect() cannot
+#' read directly) and passed through st_make_valid() before rasterizing.
+#'
+#' @param buckets    Named list, IN PRIORITY ORDER — when two buckets' most
+#'   recent year is exactly equal at a cell (always true for a per-year
+#'   band, since every included feature already shares that year), the
+#'   LATER-named bucket in this list wins. Each name is a class label; each
+#'   value is a character vector of gdb layer names (resolved via
+#'   `gdb_path`) or file paths readable by sf::st_read(), unioned together
+#'   for that class.
+#' @param gdb_path   Character. Geodatabase path for bucket entries that are
+#'   bare layer names. NULL if every bucket entry is already a full file
+#'   path.
+#' @param year_field Character. Field holding each feature's year. Default
+#'   "AR_YEAR".
+#' @param template   SpatRaster defining the output grid (crs/extent/res) —
+#'   e.g. a group's DEM.
+#' @param years      Integer vector of years to produce per-year bands for.
+#'   Default: every year present across all buckets' `year_field` values
+#'   within `crop_to` (if supplied) — i.e. computed from the data itself.
+#' @param crop_to    sf/SpatVector (any CRS) to spatially filter source
+#'   layers via a pushed-down query before reading — e.g. a group AOI.
+#'   Strongly recommended for province/national-scale sources (this is the
+#'   vector-data equivalent of `path_lazy`'s crop-before-reproject: without
+#'   it, every layer is read in full). Buffered by crop_buffer_m.
+#' @param crop_buffer_m Numeric. Buffer applied to crop_to, in crop_to's own
+#'   units. Default 1000.
+#'
+#' @return SpatRaster: one layer per year in `years` (named "y<year>") plus
+#'   one "combined" layer, integer-coded — 0 = none of the buckets ("other"),
+#'   1 = first bucket, 2 = second bucket, etc. (matches `seq_along(buckets)`
+#'   in the order `buckets` was given, NOT priority order). Pair with
+#'   `class_levels = data.frame(ID = 0:length(buckets), Class = c("other",
+#'   names(buckets)))` when passing to the hydroweight stage.
+rasterize_competing_classes <- function(
+  buckets,
+  gdb_path = NULL,
+  year_field = "AR_YEAR",
+  template,
+  years = NULL,
+  crop_to = NULL,
+  crop_buffer_m = 1000
+) {
+  if (!requireNamespace("sf", quietly = TRUE)) {
+    stop("Package 'sf' is required.")
+  }
+  if (is.null(names(buckets)) || any(!nzchar(names(buckets)))) {
+    stop("buckets must be a named list (one name per class).")
+  }
+
+  read_one <- function(layer_ref) {
+    is_bare_layer <- is.null(gdb_path) == FALSE && !grepl("[.]", basename(layer_ref))
+    src <- if (is_bare_layer) gdb_path else layer_ref
+    lyr <- if (is_bare_layer) layer_ref else NULL
+
+    wkt_filter <- NA_character_
+    if (!is.null(crop_to)) {
+      src_crs <- sf::st_crs(sf::st_layers(src)$crs[[
+        if (is.null(lyr)) 1 else which(sf::st_layers(src)$name == lyr)
+      ]])
+      crop_geom <- crop_to |>
+        sf::st_transform(src_crs) |>
+        sf::st_buffer(crop_buffer_m)
+      wkt_filter <- sf::st_as_text(sf::st_geometry(crop_geom)[[1]])
+    }
+
+    x <- if (is.na(wkt_filter)) {
+      sf::st_read(src, layer = lyr, quiet = TRUE)
+    } else {
+      sf::st_read(src, layer = lyr, wkt_filter = wkt_filter, quiet = TRUE)
+    }
+
+    if (nrow(x) == 0) {
+      return(x)
+    }
+    if (!year_field %in% names(x)) {
+      stop(sprintf("Layer '%s' has no field '%s'.", layer_ref, year_field))
+    }
+
+    x |>
+      dplyr::select(dplyr::all_of(year_field)) |>
+      sf::st_cast("MULTIPOLYGON") |>
+      sf::st_make_valid() |>
+      sf::st_transform(terra::crs(template)) |>
+      dplyr::filter(!is.na(.data[[year_field]]))
+  }
+
+  read_bucket <- function(layer_refs) {
+    parts <- lapply(layer_refs, read_one)
+    parts <- parts[vapply(parts, nrow, integer(1)) > 0]
+    if (length(parts) == 0) {
+      return(NULL)
+    }
+    dplyr::bind_rows(parts)
+  }
+
+  cw_or_message <- function(msg) {
+    if (exists("cw_inform", mode = "function")) cw_inform(msg) else message(msg)
+  }
+
+  cw_or_message("Reading and cleaning bucket layers...")
+  bucket_sf <- lapply(buckets, read_bucket)
+
+  if (is.null(years)) {
+    all_years <- unlist(lapply(bucket_sf, function(x) {
+      if (is.null(x)) NULL else x[[year_field]]
+    }))
+    years <- sort(unique(all_years))
+    if (length(years) == 0) {
+      stop("No features found in any bucket (after crop_to filtering) — nothing to rasterize.")
+    }
+  }
+
+  rasterize_year_field <- function(x) {
+    if (is.null(x) || nrow(x) == 0) {
+      return(NULL)
+    }
+    terra::rasterize(
+      terra::vect(x),
+      template,
+      field = year_field,
+      fun = "max",
+      background = NA
+    )
+  }
+
+  # Operates on plain in-memory numeric vectors (terra::values()), not
+  # SpatRaster ifel() — each ifel() call is disk-backed and, measured
+  # directly against this, ~4x slower per bucket than the vector
+  # equivalent. Across every year band that difference dominates runtime
+  # (confirmed: cut a 12-group real-data run from ~200s to well under a
+  # minute). Converted back to a SpatRaster via the `template` shape once
+  # at the end of each call.
+  combine_bucket_years <- function(year_rasters) {
+    n_cell <- terra::ncell(template)
+    best_year <- rep(NA_real_, n_cell)
+    best_class <- rep(0L, n_cell)
+    for (i in seq_along(year_rasters)) {
+      yr <- year_rasters[[i]]
+      if (is.null(yr)) next
+      v <- terra::values(yr)[, 1]
+      take <- !is.na(v) & (is.na(best_year) | v >= best_year)
+      best_year[take] <- v[take]
+      best_class[take] <- i
+    }
+    out <- template[[1]]
+    terra::values(out) <- best_class
+    out
+  }
+
+  cw_or_message(glue::glue("Rasterizing {length(years)} year(s) + combined..."))
+
+  year_bands <- purrr::map(years, function(yr) {
+    year_bucket_rasters <- lapply(bucket_sf, function(x) {
+      if (is.null(x)) NULL else rasterize_year_field(x[x[[year_field]] == yr, ])
+    })
+    combine_bucket_years(year_bucket_rasters)
+  })
+  names(year_bands) <- paste0("y", years)
+
+  all_bucket_rasters <- lapply(bucket_sf, rasterize_year_field)
+  combined_band <- combine_bucket_years(all_bucket_rasters)
+
+  out <- terra::rast(c(year_bands, list(combined = combined_band)))
+  names(out) <- c(paste0("y", years), "combined")
+  out
 }
 
 # -- Null coalescing operator (mirrors standard R 4.4+ behaviour) ----
