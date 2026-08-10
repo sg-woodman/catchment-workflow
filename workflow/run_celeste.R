@@ -298,12 +298,72 @@ build_mosaic_vrt(
   vrt_path = ndvi_vrt_path
 )
 
+# Harvest/regen disturbance (Ontario only: shared_data/raw/harvest/
+# ontario_harvest.gdb). Only NIP, TUR, and KEN sites fall inside Ontario's
+# harvest-tracked extent (confirmed by real spatial-filter feature counts,
+# not just a bounding-box check) — COC/MOR/NBE sites get no coverage and
+# are silently excluded downstream (the same "all NA after crop/mask"
+# path as the NDVI/NBE gap).
+#
+# Rasterized once per group (not once for all of Ontario — like the NDVI
+# VRT, the combined extent across groups is far larger than actual site
+# coverage) via rasterize_competing_classes(): one band per AR_YEAR present
+# in the group's data, plus one "combined" (all-years) band. Two competing
+# classes, most-recent-AR_YEAR-wins where they'd otherwise overlap (ties —
+# which is EVERY within-year overlap, since a per-year band only ever
+# includes same-year features from both classes by construction — go to
+# whichever bucket is named LAST in `buckets` below; regen is last, so
+# regen wins ties, matching "harvested then regenerated -> regen" as the
+# more ecologically current state).
+#
+# CC-only for now (Harvest_CC02 + Harvest_CC17 = the full 2002-2024 clear-
+# cut record, two non-overlapping vintage exports of the same product).
+# To include seed-tree/selection and shelterwood harvest too, add
+# Harvest_SE02/17 and Harvest_SH02/17 to the harvest bucket below — no
+# other code changes needed.
+harvest_regen_groups <- c("NIP", "TUR", "KEN")
+ontario_harvest_gdb <- "~/Documents/cfs/shared_data/raw/harvest/ontario_harvest.gdb"
+
+for (grp in harvest_regen_groups) {
+  group_raster_path <- here(
+    "cache", PROJECT_ID, "hydroweight_loi", "harvest_regen", paste0(grp, ".tif")
+  )
+  if (cache_exists(group_raster_path)) next
+
+  dir_create(fs::path_dir(group_raster_path))
+  grp_aoi <- group_manifest[group_manifest$group_id == grp, ]
+  grp_template <- rast(here("cache", PROJECT_ID, grp, "dem_breached.tif"))
+
+  hr <- rasterize_competing_classes(
+    buckets = list(
+      harvest = c("Harvest_CC02", "Harvest_CC17"),
+      regen   = c("Regen_Seed", "Regen_Natural", "Regen_Plant")
+    ),
+    gdb_path = path.expand(ontario_harvest_gdb),
+    template = grp_template,
+    crop_to  = grp_aoi
+  )
+  writeRaster(
+    hr,
+    group_raster_path,
+    overwrite = TRUE,
+    datatype = "INT1U",
+    gdal = "PHOTOMETRIC=MINISBLACK" # avoid a real GDAL quirk: an
+    # exactly-3-band Byte GeoTIFF gets auto-tagged as RGB, silently
+    # renaming bands to red/green/blue on every subsequent read
+  )
+}
+
+harvest_regen_levels <- data.frame(ID = 0:2, Class = c("other", "harvest", "regen"))
+
 loi_layers <- list(
   list(
-    path = here("data/celeste_loi/landcover.tif"),
-    name = "landcover",
-    type = "categorical"
-    # class_levels = data.frame(ID = c(...), Class = c(...))  # optional
+    path_lazy = here(
+      "cache", PROJECT_ID, "hydroweight_loi", "harvest_regen", "{group_id}.tif"
+    ),
+    name = "harvest_regen",
+    type = "categorical",
+    class_levels = harvest_regen_levels
   ),
   list(
     path_lazy = ndvi_vrt_path,
