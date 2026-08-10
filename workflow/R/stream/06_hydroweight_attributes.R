@@ -129,6 +129,7 @@ calculate_hydroweight_attributes_stream <- function(
 
     process_hw_site_stream(
       site_id           = site_id,
+      group_id          = grp,
       version           = version,
       output_dir        = output_dir,
       cache_dir         = cache_dir,
@@ -195,7 +196,13 @@ validate_loi_layers_stream <- function(loi_layers) {
     if (has_path && !cache_exists(lyr[["path"]])) {
       cw_abort(glue::glue("loi_layers[[{i}]] ({lbl}): file not found — {lyr[['path']]}"))
     }
-    if (has_lazy && !cache_exists(lyr[["path_lazy"]])) {
+    # path_lazy may itself be a template (containing "{group_id}" and/or
+    # "{site_id}") for a source that varies per group/site (e.g. one
+    # rasterized harvest/regen layer per HydroBasins group) — only check
+    # existence up front for a literal (non-templated) path; templated ones
+    # are checked per site/group in resolve_site_loi_raster().
+    if (has_lazy && !grepl("\\{(group_id|site_id)\\}", lyr[["path_lazy"]]) &&
+      !cache_exists(lyr[["path_lazy"]])) {
       cw_abort(glue::glue("loi_layers[[{i}]] ({lbl}): file not found — {lyr[['path_lazy']]}"))
     }
     if (is.null(lyr$type) || !lyr$type %in% c("categorical", "continuous")) {
@@ -262,15 +269,21 @@ prepare_loi_layers_stream <- function(loi_layers, cache_dir, raster_crs) {
 #'
 #' @param loi_desc     LOI layer descriptor with path_template or path_lazy
 #' @param site_id      Character. Site identifier
+#' @param group_id     Character. The site's group identifier — substituted
+#'   into a "{group_id}" placeholder in path_lazy, e.g. for one shared
+#'   source per HydroBasins group (rasterized once per group, cropped once
+#'   more per site here since a group-scale source is itself often too
+#'   large to cache whole — see build_mosaic_vrt()'s docstring for the same
+#'   reasoning at province scale).
 #' @param catchment_sf sf polygon. The site's catchment (current version),
 #'   used to crop path_lazy sources. Ignored for path_template.
 #' @param cache_dir    Character. Project cache directory
 #' @param raster_crs   Character. Target CRS
 #' @return SpatRaster, or NULL if the site's raster file doesn't exist
-resolve_site_loi_raster <- function(loi_desc, site_id, catchment_sf, cache_dir, raster_crs) {
+resolve_site_loi_raster <- function(loi_desc, site_id, group_id, catchment_sf, cache_dir, raster_crs) {
   is_lazy <- !is.null(loi_desc[["path_lazy"]])
   raw_path <- if (is_lazy) {
-    loi_desc[["path_lazy"]]
+    gsub("\\{site_id\\}", site_id, gsub("\\{group_id\\}", group_id, loi_desc[["path_lazy"]]))
   } else {
     gsub("\\{site_id\\}", site_id, loi_desc[["path_template"]])
   }
@@ -335,17 +348,45 @@ prepare_one_loi_raster <- function(
       raw <- terra::project(raw, raster_crs, method = method)
     }
     dtype <- if (type == "categorical") "INT1U" else "FLT4S"
-    terra::writeRaster(raw, cache_path, overwrite = TRUE, datatype = dtype)
+    # PHOTOMETRIC=MINISBLACK guards against a real, confirmed GDAL quirk:
+    # an exactly-3-band Byte GeoTIFF gets auto-tagged as RGB imagery on
+    # write, which silently renames the bands to "red"/"green"/"blue" on
+    # every subsequent read — corrupting layer names for e.g. a group with
+    # exactly 2 years + 1 combined band. Harmless for other band counts/
+    # types; always applied for consistency.
+    gdal_opts <- if (type == "categorical") "PHOTOMETRIC=MINISBLACK" else NULL
+    terra::writeRaster(raw, cache_path, overwrite = TRUE, datatype = dtype, gdal = gdal_opts)
     cw_inform(glue::glue("  -> Cached: {cache_path}"))
   }
 
   r <- terra::rast(cache_path)
 
-  if (type == "categorical") {
+  if (type == "categorical" && !is.null(class_levels)) {
+    # Multi-layer SpatRasters have unreliable factor-level semantics in
+    # terra (confirmed by direct testing, not assumed):
+    #   - `levels(r) <- class_levels` on the whole object only applies to
+    #     layer 1; layers 2+ silently keep as.factor()'s own auto-generated
+    #     labels (observed: "green"/"blue"-style defaults, not an error).
+    #   - Setting it per layer (`levels(r[[k]]) <- ...`) works, but each
+    #     call renames THAT layer to the class_levels attribute column's
+    #     name (e.g. "Class"), discarding whatever it was named before.
+    #   - Restoring names afterwards with `names(r) <- orig_names` on the
+    #     already-leveled multi-layer object then *wipes the levels back
+    #     out* — silently reverting to as.factor()'s defaults again.
+    # The only combination that reliably keeps both name and levels intact
+    # is doing it per layer on independent single-layer rasters (each
+    # individually verified safe), then recombining. Cheap enough — this
+    # runs once per LOI per cache miss, not per site.
+    band_names <- names(r)
+    bands <- lapply(seq_len(terra::nlyr(r)), function(k) {
+      b <- terra::as.factor(r[[k]])
+      levels(b) <- class_levels
+      names(b) <- band_names[k]
+      b
+    })
+    r <- terra::rast(bands)
+  } else if (type == "categorical") {
     r <- terra::as.factor(r)
-    if (!is.null(class_levels)) {
-      levels(r) <- class_levels
-    }
   }
 
   r
@@ -375,6 +416,7 @@ resolve_hw_streams_path_stream <- function(output_dir, site_id, version) {
 #'   attributes, or NULL
 process_hw_site_stream <- function(
   site_id,
+  group_id,
   version,
   output_dir,
   cache_dir,
@@ -482,7 +524,7 @@ process_hw_site_stream <- function(
   attr_tables <- purrr::map(seq_along(loi_layers), function(i) {
     lyr_desc <- loi_layers[[i]]
     lyr_rast <- loi_prepared[[i]] %||%
-      resolve_site_loi_raster(lyr_desc, site_id, site_catch_sf, cache_dir, raster_crs)
+      resolve_site_loi_raster(lyr_desc, site_id, group_id, site_catch_sf, cache_dir, raster_crs)
 
     if (is.null(lyr_rast)) return(NULL)
 
@@ -550,44 +592,55 @@ run_loi_attributes_stream <- function(
     return(NULL)
   }
 
-  if (loi_numeric && terra::nlyr(loi_site) > 1) {
+  if (terra::nlyr(loi_site) > 1) {
     return(run_loi_attributes_stream_multilayer(
-      loi_site   = loi_site,
-      loi_desc   = loi_desc,
-      site_catch = site_catch,
-      hw         = hw,
-      site_id    = site_id,
-      version    = version
+      loi_site    = loi_site,
+      loi_desc    = loi_desc,
+      loi_numeric = loi_numeric,
+      site_catch  = site_catch,
+      hw          = hw,
+      site_id     = site_id,
+      version     = version
     ))
   }
 
-  hwa <- tryCatch(
-    hydroweight::hydroweight_attributes(
-      loi              = loi_site,
-      loi_numeric      = loi_numeric,
-      roi              = site_catch,
-      roi_uid          = "1",
-      roi_uid_col      = site_id,
-      distance_weights = hw,
-      remove_region    = NULL,
-      return_products  = FALSE
-    ),
-    error = function(e) {
-      cw_warn(glue::glue(
-        "Site '{site_id}' [{version}], LOI '{loi_name}': ",
-        "hydroweight_attributes() failed — {e$message}"
-      ))
-      NULL
-    }
-  )
+  present_id <- if (!loi_numeric) single_class_value(loi_site) else NULL
 
-  if (is.null(hwa)) return(NULL)
+  if (!is.null(present_id)) {
+    attr_tbl <- degenerate_categorical_table(present_id, loi_desc$class_levels, names(hw))
+  } else {
+    hwa <- tryCatch(
+      hydroweight::hydroweight_attributes(
+        loi              = if (loi_numeric) {
+          loi_site
+        } else {
+          prep_categorical_for_hydroweight(loi_site, loi_desc$class_levels)
+        },
+        loi_numeric      = loi_numeric,
+        roi              = site_catch,
+        roi_uid          = "1",
+        roi_uid_col      = site_id,
+        distance_weights = hw,
+        remove_region    = NULL,
+        return_products  = FALSE
+      ),
+      error = function(e) {
+        cw_warn(glue::glue(
+          "Site '{site_id}' [{version}], LOI '{loi_name}': ",
+          "hydroweight_attributes() failed — {e$message}"
+        ))
+        NULL
+      }
+    )
 
-  attr_tbl <- hwa$attribute_table |>
-    dplyr::select(-dplyr::any_of(c(site_id, "1")))
+    if (is.null(hwa)) return(NULL)
+    attr_tbl <- hwa$attribute_table |>
+      dplyr::select(-dplyr::any_of(c(site_id, "1")))
+  }
 
   if (!loi_numeric) {
     attr_tbl <- clean_categorical_columns_stream(attr_tbl, loi_name, loi_desc$class_levels)
+    attr_tbl <- ensure_full_categorical_schema(attr_tbl, loi_name, loi_desc$class_levels, names(hw))
   } else {
     attr_tbl <- clean_continuous_columns_stream(attr_tbl, loi_name, loi_desc$stats)
   }
@@ -595,12 +648,28 @@ run_loi_attributes_stream <- function(
   attr_tbl
 }
 
-#' Process a multi-layer continuous LOI one layer at a time (see lake module
-#' for why: hydroweight_attributes()'s internal pivot_wider() cannot handle
-#' multi-layer rasters directly).
+#' Process a multi-layer LOI (continuous or categorical) one layer at a time
+#'
+#' hydroweight_attributes()'s internal pivot_wider() cannot handle multi-
+#' layer rasters directly, so each layer is run separately and the results
+#' column-bound. WHERE cleaning happens differs by type, and this is not
+#' cosmetic — verified directly against real hydroweight() output:
+#'
+#'   continuous: raw column names embed the raster layer's own name/index
+#'     (e.g. "y2015_mean"), so per-layer results are already distinct
+#'     before binding — clean_continuous_columns_stream() runs ONCE, after
+#'     binding everything, exactly as the single-layer path does.
+#'   categorical: raw column names are ALWAYS "Class_{id}_{scheme}_prop" —
+#'     the LOI's names() has no effect on this whatsoever (confirmed: an
+#'     explicitly-renamed layer still produced "Class_..." columns, not
+#'     "<name>_..."). Every year's raw output is therefore byte-identical
+#'     to every other year's, and binding first would silently collide/
+#'     mangle columns. clean_categorical_columns_stream() must run
+#'     PER LAYER, with a layer-specific name prefix, BEFORE binding.
 run_loi_attributes_stream_multilayer <- function(
   loi_site,
   loi_desc,
+  loi_numeric,
   site_catch,
   hw,
   site_id,
@@ -615,41 +684,153 @@ run_loi_attributes_stream_multilayer <- function(
 
   layer_tbls <- purrr::map(seq_len(terra::nlyr(loi_site)), function(k) {
     single <- loi_site[[k]]
-    names(single) <- layer_names[k]
+    if (loi_numeric) {
+      names(single) <- layer_names[k]
+    }
 
-    hwa_k <- tryCatch(
-      hydroweight::hydroweight_attributes(
-        loi              = single,
-        loi_numeric      = TRUE,
-        roi              = site_catch,
-        roi_uid          = "1",
-        roi_uid_col      = site_id,
-        distance_weights = hw,
-        remove_region    = NULL,
-        return_products  = FALSE
-      ),
-      error = function(e) {
-        cw_warn(glue::glue(
-          "Site '{site_id}' [{version}], LOI '{loi_name}' layer {k}: ",
-          "hydroweight_attributes() failed — {e$message}"
-        ))
-        NULL
-      }
-    )
+    if (all(is.na(terra::values(single)))) {
+      return(NULL)
+    }
 
-    if (is.null(hwa_k)) return(NULL)
-    hwa_k$attribute_table |>
-      dplyr::select(-dplyr::any_of(c(site_id, "1")))
+    present_id <- if (!loi_numeric) single_class_value(single) else NULL
+
+    if (!is.null(present_id)) {
+      tbl_k <- degenerate_categorical_table(present_id, loi_desc$class_levels, names(hw))
+    } else {
+      hwa_k <- tryCatch(
+        hydroweight::hydroweight_attributes(
+          loi              = if (loi_numeric) {
+            single
+          } else {
+            prep_categorical_for_hydroweight(single, loi_desc$class_levels)
+          },
+          loi_numeric      = loi_numeric,
+          roi              = site_catch,
+          roi_uid          = "1",
+          roi_uid_col      = site_id,
+          distance_weights = hw,
+          remove_region    = NULL,
+          return_products  = FALSE
+        ),
+        error = function(e) {
+          cw_warn(glue::glue(
+            "Site '{site_id}' [{version}], LOI '{loi_name}' layer {k}: ",
+            "hydroweight_attributes() failed — {e$message}"
+          ))
+          NULL
+        }
+      )
+
+      if (is.null(hwa_k)) return(NULL)
+      tbl_k <- hwa_k$attribute_table |>
+        dplyr::select(-dplyr::any_of(c(site_id, "1")))
+    }
+
+    if (!loi_numeric) {
+      layer_prefix <- paste0(loi_name, "_", layer_names[k])
+      tbl_k <- clean_categorical_columns_stream(tbl_k, layer_prefix, loi_desc$class_levels)
+      tbl_k <- ensure_full_categorical_schema(tbl_k, layer_prefix, loi_desc$class_levels, names(hw))
+    }
+    tbl_k
   })
 
   layer_tbls <- layer_tbls[!vapply(layer_tbls, is.null, logical(1))]
   if (length(layer_tbls) == 0) return(NULL)
 
   combined <- dplyr::bind_cols(layer_tbls)
-  clean_continuous_columns_stream(combined, loi_name, loi_desc$stats)
+  if (loi_numeric) {
+    clean_continuous_columns_stream(combined, loi_name, loi_desc$stats)
+  } else {
+    combined
+  }
+}
+
+# -- Degenerate (single-class) categorical layers -----------------------------
+
+#' Check whether a categorical LOI has only one distinct non-NA value
+#'
+#' Common for a sparse categorical time series clipped to a small
+#' catchment — e.g. most years of a harvest/regen record having zero
+#' recorded activity within a given site's catchment, leaving every cell
+#' "other".
+#'
+#' @param loi SpatRaster, single layer
+#' @return The single present value (numeric), or NULL if 2+ distinct
+#'   values are present (the normal, non-degenerate case) or the layer is
+#'   entirely NA (handled separately by the caller).
+single_class_value <- function(loi) {
+  u <- unique(terra::values(loi))
+  u <- u[!is.na(u)]
+  if (length(u) == 1) u[1] else NULL
+}
+
+#' Build a "Class_{id}_{scheme}_prop" attribute table directly for a
+#' degenerate (single-class) categorical layer, bypassing
+#' hydroweight_attributes() entirely
+#'
+#' hydroweight_attributes() produces an ambiguous, id-less column name
+#' ("Class_{scheme}_prop", no class number) when only one class is present
+#' in the LOI — confirmed empirically against real output, not documented —
+#' which clean_categorical_columns_stream() cannot parse (there's no id to
+#' look up in class_levels). Sidestepped here with a shortcut that is
+#' EXACT, not approximate: when one class covers 100% of the (already
+#' catchment-masked) LOI extent, its distance-weighted proportion is
+#' exactly 1.0 under ANY weighting scheme — the class indicator is 1
+#' everywhere in the ROI, so sum(indicator * weight) / sum(weight) =
+#' sum(weight) / sum(weight) = 1 regardless of the actual weight values —
+#' and every other class is exactly 0.0. No need to touch the distance-
+#' weight rasters, or even call hydroweight_attributes(), at all.
+#'
+#' @param present_id   Numeric. The one class ID present (from
+#'   single_class_value()).
+#' @param class_levels data.frame with ID/Class columns.
+#' @param scheme_names Character vector of weighting scheme names (e.g.
+#'   names(hw)) — matches what hydroweight_attributes() would have used.
+#' @return tibble with one row, columns "Class_{id}_{scheme}_prop" for
+#'   every id x scheme combination — the same raw format
+#'   clean_categorical_columns_stream() expects from a real
+#'   hydroweight_attributes() call.
+degenerate_categorical_table <- function(present_id, class_levels, scheme_names) {
+  grid <- tidyr::expand_grid(id = class_levels$ID, scheme = scheme_names)
+  vals <- as.list(as.numeric(grid$id == present_id))
+  names(vals) <- paste0("Class_", grid$id, "_", grid$scheme, "_prop")
+  tibble::as_tibble(vals)
 }
 
 # -- Column cleaning ----------------------------------------------------------
+
+#' Force a categorical LOI's layer name to its class_levels attribute
+#' column name (e.g. "Class"), right before hydroweight_attributes()
+#'
+#' hydroweight_attributes()'s raw categorical output column format depends
+#' on the LOI raster's names() in ways that are not documented and were
+#' confirmed empirically, not assumed:
+#'   - names() == the class_levels attribute column name (e.g. "Class") ->
+#'     "Class_{id}_{scheme}_prop" (scheme included even with 7 real
+#'     schemes — verified against real hydroweight() output).
+#'   - names() == anything else (e.g. "y2015") -> "{that_name}_{id}_
+#'     {scheme}_prop" instead — a DIFFERENT format, breaking
+#'     clean_categorical_columns_stream()'s parsing.
+#' Forcing the name here — on a throwaway copy, right before the call —
+#' guarantees the first (parseable) format regardless of what the LOI was
+#' named upstream (e.g. a per-year band explicitly named "y2015" so it
+#' stays distinguishable through crop/mask). The year/layer-specific prefix
+#' in the FINAL column names comes from the `loi_name` argument callers
+#' pass to clean_categorical_columns_stream() afterwards, not from this.
+#'
+#' @param loi          SpatRaster, single categorical layer
+#' @param class_levels data.frame with ID + one other column (e.g. Class),
+#'   or NULL (in which case `loi` is returned unchanged — no known attribute
+#'   column name to force it to).
+#' @return SpatRaster with names() set to the class_levels attribute column
+prep_categorical_for_hydroweight <- function(loi, class_levels) {
+  if (is.null(class_levels)) {
+    return(loi)
+  }
+  attr_col <- setdiff(names(class_levels), "ID")[1]
+  names(loi) <- attr_col
+  loi
+}
 
 #' Rename categorical LOI columns from Class_{id}_{scheme} to {class}_{scheme}
 clean_categorical_columns_stream <- function(tbl, loi_name, class_levels) {
@@ -670,10 +851,58 @@ clean_categorical_columns_stream <- function(tbl, loi_name, class_levels) {
     tbl <- dplyr::rename_with(tbl, ~ paste0(loi_name, "_", .x))
   }
 
-  dplyr::rename_with(tbl, ~ gsub("[^A-Za-z0-9_]", "_", .x) |>
+  dplyr::rename_with(tbl, snake_case_cols)
+}
+
+#' Shared column-name normalization: lowercase snake_case, no repeated/
+#' trailing underscores. Used by clean_categorical_columns_stream() and
+#' ensure_full_categorical_schema() — kept as one function so the two never
+#' silently drift apart and fail to recognize each other's column names.
+snake_case_cols <- function(x) {
+  x |>
+    gsub("[^A-Za-z0-9_]", "_", x = _) |>
     gsub("_+", "_", x = _) |>
     tolower() |>
-    sub("_$", "", x = _))
+    sub("_$", "", x = _)
+}
+
+#' Ensure every {class} x {scheme} column is present after cleaning
+#'
+#' hydroweight_attributes() only reports columns for classes it actually
+#' sees occurring in the ROI — a class with zero pixels present is simply
+#' omitted, not reported as 0. Harmless for a single site processed alone,
+#' but once results from multiple sites/layers are bound together (which
+#' calculate_hydroweight_attributes_stream() always does), a column absent
+#' for one row and present for another becomes NA after dplyr::bind_rows()
+#' — indistinguishable from genuinely missing data. Fill any such column
+#' explicitly with 0 (the class is *known* to be absent, not unmeasured).
+#'
+#' @param tbl          Cleaned tibble from clean_categorical_columns_stream()
+#' @param loi_name     Character. Prefix passed to
+#'   clean_categorical_columns_stream() for this call (already includes any
+#'   layer-specific suffix, e.g. "harvest_regen_y2015").
+#' @param class_levels data.frame with ID/Class columns, or NULL (no-op).
+#' @param scheme_names Character vector of weighting scheme names (e.g.
+#'   names(hw)).
+#' @return tbl with any missing expected column added, filled with 0.
+ensure_full_categorical_schema <- function(tbl, loi_name, class_levels, scheme_names) {
+  if (is.null(class_levels)) {
+    return(tbl)
+  }
+
+  expected <- tidyr::expand_grid(
+    cls = as.character(class_levels$Class),
+    scheme = scheme_names
+  ) |>
+    dplyr::mutate(col = paste0(loi_name, "_", cls, "_", scheme, "_prop")) |>
+    dplyr::pull(col) |>
+    snake_case_cols()
+
+  missing <- setdiff(expected, names(tbl))
+  if (length(missing) > 0) {
+    tbl[missing] <- 0
+  }
+  tbl
 }
 
 #' Prefix continuous LOI columns with loi_name and optionally filter stats
