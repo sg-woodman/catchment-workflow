@@ -406,11 +406,17 @@ rasterize_competing_classes <- function(
   # Operates on plain in-memory numeric vectors (terra::values()), not
   # SpatRaster ifel() — each ifel() call is disk-backed and, measured
   # directly against this, ~4x slower per bucket than the vector
-  # equivalent. Across every year band that difference dominates runtime
-  # (confirmed: cut a 12-group real-data run from ~200s to well under a
-  # minute). Converted back to a SpatRaster via the `template` shape once
-  # at the end of each call.
-  combine_bucket_years <- function(year_rasters) {
+  # equivalent (confirmed: cut a 12-group real-data run from ~200s to well
+  # under a minute for TUR). Writes the result straight to out_path and
+  # returns only the path — critical for large groups, not just tidy:
+  # KEN's grid is 139.5M cells (3.5x TUR's); the original version of this
+  # function returned a SpatRaster and the caller accumulated all 24
+  # (23 years + combined) of them in a list before combining at the end,
+  # which meant ~24 in-memory full-size rasters alive simultaneously and
+  # OOM-killed a real run on KEN (confirmed: exit 137). Writing
+  # immediately and keeping only the (tiny) file path means at most one
+  # band's worth of full-size vectors is ever alive at a time.
+  combine_bucket_years <- function(year_rasters, out_path) {
     n_cell <- terra::ncell(template)
     best_year <- rep(NA_real_, n_cell)
     best_class <- rep(0L, n_cell)
@@ -424,23 +430,45 @@ rasterize_competing_classes <- function(
     }
     out <- template[[1]]
     terra::values(out) <- best_class
-    out
+    terra::writeRaster(out, out_path, overwrite = TRUE, datatype = "INT1U")
+    invisible(out_path)
   }
 
   cw_or_message(glue::glue("Rasterizing {length(years)} year(s) + combined..."))
 
-  year_bands <- purrr::map(years, function(yr) {
+  # NOT cleaned up on exit — the returned raster is a LAZY reference to
+  # these files (terra::rast() on paths doesn't materialize data), so
+  # they must survive until the caller actually reads from it (e.g. their
+  # own writeRaster() call). Left for the R session's normal temp-
+  # directory cleanup, same as terra's own internal temp files.
+  tmp_dir <- tempfile("rasterize_competing_classes_")
+  dir.create(tmp_dir)
+
+  year_paths <- purrr::map_chr(years, function(yr) {
     year_bucket_rasters <- lapply(bucket_sf, function(x) {
       if (is.null(x)) NULL else rasterize_year_field(x[x[[year_field]] == yr, ])
     })
-    combine_bucket_years(year_bucket_rasters)
+    out_path <- combine_bucket_years(
+      year_bucket_rasters,
+      fs::path(tmp_dir, glue::glue("y{yr}.tif"))
+    )
+    rm(year_bucket_rasters)
+    gc(FALSE)
+    out_path
   })
-  names(year_bands) <- paste0("y", years)
 
   all_bucket_rasters <- lapply(bucket_sf, rasterize_year_field)
-  combined_band <- combine_bucket_years(all_bucket_rasters)
+  combined_path <- combine_bucket_years(
+    all_bucket_rasters,
+    fs::path(tmp_dir, "combined.tif")
+  )
+  rm(all_bucket_rasters)
+  gc(FALSE)
 
-  out <- terra::rast(c(year_bands, list(combined = combined_band)))
+  # Lazy read — terra::rast() on file paths doesn't materialize the data,
+  # only the caller's eventual writeRaster()/values() call does, and that
+  # happens in terra's own chunked fashion.
+  out <- terra::rast(c(year_paths, combined_path))
   names(out) <- c(paste0("y", years), "combined")
   out
 }
