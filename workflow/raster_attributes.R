@@ -296,13 +296,33 @@ build_mosaic_vrt <- function(files, vrt_path, nodata = "nan", overwrite = TRUE) 
 #'   e.g. a group's DEM.
 #' @param years      Integer vector of years to produce per-year bands for.
 #'   Default: every year present across all buckets' `year_field` values
-#'   within `crop_to` (if supplied) — i.e. computed from the data itself.
+#'   within `crop_to` and `year_range` (if supplied) — i.e. computed from
+#'   the data itself.
+#' @param year_range Optional length-2 integer vector `c(min, max)`.
+#'   Features outside this range are dropped BEFORE any rasterization —
+#'   affects both the per-year bands and "combined" (unlike `years`, which
+#'   only controls which per-year bands get produced but leaves "combined"
+#'   using every year present). Use this to make two sources with
+#'   different native date ranges comparable — e.g. one region's record
+#'   going back to 1961 and another's only to 2002; without this, the
+#'   longer-record region's "combined" band reflects a much longer
+#'   disturbance history and isn't a fair comparison. Default NULL (no
+#'   filtering).
 #' @param crop_to    sf/SpatVector (any CRS) to spatially filter source
 #'   layers to — e.g. a group AOI. Recommended for province/national-scale
 #'   sources so the rest of the pipeline only deals with the relevant
 #'   subset. Buffered by crop_buffer_m. NOT pushed down to OGR at read
 #'   time (deliberately — see below); every layer is read in full, then
-#'   filtered in R after geometry cleanup.
+#'   filtered in R after geometry cleanup. Also used to mask the OUTPUT:
+#'   cells outside crop_to are set to NA (not the "other"/0 background),
+#'   since we never evaluated whether they're disturbed or not — 0 would
+#'   misrepresent "not checked" as "confirmed absent". Confirmed this
+#'   distinction matters in practice: `template`'s extent is a rectangular
+#'   DEM crop, usually noticeably larger than the (irregular) AOI actually
+#'   passed as crop_to, so without this mask a real disturbance polygon
+#'   just outside the AOI — never touched by rasterization at all — reads
+#'   as indistinguishable from a location confirmed to have no harvest or
+#'   regen.
 #' @param crop_buffer_m Numeric. Buffer applied to crop_to (after
 #'   transforming it to `template`'s CRS), in that CRS's units (metres for
 #'   every CRS used in this project). Default 1000.
@@ -310,15 +330,17 @@ build_mosaic_vrt <- function(files, vrt_path, nodata = "nan", overwrite = TRUE) 
 #' @return SpatRaster: one layer per year in `years` (named "y<year>") plus
 #'   one "combined" layer, integer-coded — 0 = none of the buckets ("other"),
 #'   1 = first bucket, 2 = second bucket, etc. (matches `seq_along(buckets)`
-#'   in the order `buckets` was given, NOT priority order). Pair with
-#'   `class_levels = data.frame(ID = 0:length(buckets), Class = c("other",
-#'   names(buckets)))` when passing to the hydroweight stage.
+#'   in the order `buckets` was given, NOT priority order); NA outside
+#'   crop_to (see above), if supplied. Pair with `class_levels =
+#'   data.frame(ID = 0:length(buckets), Class = c("other", names(buckets)))`
+#'   when passing to the hydroweight stage.
 rasterize_competing_classes <- function(
   buckets,
   gdb_path = NULL,
   year_field = "AR_YEAR",
   template,
   years = NULL,
+  year_range = NULL,
   crop_to = NULL,
   crop_buffer_m = 1000
 ) {
@@ -327,6 +349,17 @@ rasterize_competing_classes <- function(
   }
   if (is.null(names(buckets)) || any(!nzchar(names(buckets)))) {
     stop("buckets must be a named list (one name per class).")
+  }
+
+  # Computed once, in template's CRS — reused both to filter input features
+  # (in read_one()) and to mask the final output (see combine_bucket_years()
+  # / crop_to's docstring for why masking, not just filtering, matters).
+  crop_geom <- if (!is.null(crop_to)) {
+    crop_to |>
+      sf::st_transform(terra::crs(template)) |>
+      sf::st_buffer(crop_buffer_m)
+  } else {
+    NULL
   }
 
   read_one <- function(layer_ref) {
@@ -380,11 +413,12 @@ rasterize_competing_classes <- function(
       sf::st_transform(terra::crs(template)) |>
       dplyr::filter(!is.na(.data[[year_field]]))
 
-    if (!is.null(crop_to) && nrow(x) > 0) {
-      crop_geom <- crop_to |>
-        sf::st_transform(terra::crs(template)) |>
-        sf::st_buffer(crop_buffer_m)
+    if (!is.null(crop_geom) && nrow(x) > 0) {
       x <- sf::st_filter(x, crop_geom)
+    }
+
+    if (!is.null(year_range) && nrow(x) > 0) {
+      x <- x[x[[year_field]] >= year_range[1] & x[[year_field]] <= year_range[2], ]
     }
 
     x
@@ -429,6 +463,17 @@ rasterize_competing_classes <- function(
     )
   }
 
+  # Boolean vector, TRUE for cells inside crop_geom — computed once (a
+  # single rasterize() call), applied to every band in combine_bucket_
+  # years() below. Kept as a plain vector, not a SpatRaster, for the same
+  # in-memory-vector-arithmetic reason as combine_bucket_years() itself.
+  inside_mask <- if (is.null(crop_geom)) {
+    NULL
+  } else {
+    m <- terra::rasterize(terra::vect(crop_geom), template, field = 1, background = NA)
+    !is.na(terra::values(m)[, 1])
+  }
+
   # Operates on plain in-memory numeric vectors (terra::values()), not
   # SpatRaster ifel() — each ifel() call is disk-backed and, measured
   # directly against this, ~4x slower per bucket than the vector
@@ -453,6 +498,15 @@ rasterize_competing_classes <- function(
       take <- !is.na(v) & (is.na(best_year) | v >= best_year)
       best_year[take] <- v[take]
       best_class[take] <- i
+    }
+    # NA (not 0/"other") outside crop_to — see crop_to's docstring for why
+    # this distinction is real, not cosmetic: a cell here was never
+    # evaluated, so 0 would misrepresent "not checked" as "confirmed
+    # absent" (confirmed in practice: a real disturbance polygon just
+    # outside a group's AOI, inside its rectangular DEM extent, otherwise
+    # reads identically to a location with genuinely no harvest/regen).
+    if (!is.null(inside_mask)) {
+      best_class[!inside_mask] <- NA_integer_
     }
     out <- template[[1]]
     terra::values(out) <- best_class
