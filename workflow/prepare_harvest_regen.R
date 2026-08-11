@@ -21,10 +21,19 @@
 #     Harvest_CC17 = the full 2002-2024 clear-cut record, two non-
 #     overlapping vintage exports of the same product).
 #   New Brunswick / Irving (data/irving_harvest/
-#     LB_HarvCuHi_RefCuHi_SICuHi.gdb): NBE. HARVYR (harvest) / RFYR
-#     (regen) fields, staged (cleaned + renamed to AR_YEAR) before
-#     rasterizing — see stage_nb_harvest_layer() for why. CC-only harvest
-#     scope too (HARVTRT == "CC"), for consistency with Ontario.
+#     LB_HarvCuHi_RefCuHi_SICuHi.gdb): NBE, COC (both confirmed by real
+#     spatial-filter feature counts against the actual gdb — MOR was
+#     checked against both sources and gets zero from either, a genuine
+#     gap, not a filtering bug). HARVYR (harvest) / RFYR (regen) fields,
+#     staged (cleaned + renamed to AR_YEAR) before rasterizing — see
+#     stage_nb_harvest_layer() for why. CC-only harvest scope too
+#     (HARVTRT == "CC"), for consistency with Ontario.
+#
+# Both sources are restricted to year_range 2002-2024 (Ontario's native
+# range) even though NB's own record goes back to 1961 — otherwise NB's
+# "combined" band would reflect a much longer disturbance history than
+# Ontario's, and the two wouldn't be comparable. Restricting NB rather than
+# extending Ontario because Ontario's record doesn't go back that far.
 #
 # To extend either source's harvest scope (e.g. add partial-cut / selection
 # methods), edit that source's `buckets`/`harv_trt` below — no changes
@@ -173,17 +182,21 @@ stage_nb_harvest_regen <- function(gdb_path, cache_dir) {
 #'   to cache_dir/hydroweight_loi/harvest_regen/<group_id>.tif, and each
 #'   group's DEM template is read from cache_dir/<group_id>/dem_breached.tif.
 #' @param sources        Named list of source configs, each with $groups
-#'   (character vector of group_ids this source covers), $gdb_path, and
+#'   (character vector of group_ids this source covers), $gdb_path,
 #'   $buckets (passed to rasterize_competing_classes(); NB's are resolved
 #'   from stage_nb_harvest_regen() by default, not hardcoded, since they're
-#'   cache paths that depend on cache_dir). Default: Ontario (NIP/TUR/KEN)
-#'   + NB (NBE) — the two sources confirmed by real spatial-filter feature
+#'   cache paths that depend on cache_dir), and $year_range (passed to
+#'   rasterize_competing_classes() — both sources default to 2002:2024 so
+#'   NB's longer native record (back to 1961) doesn't make its "combined"
+#'   band incomparable to Ontario's). Default: Ontario (NIP/TUR/KEN) + NB
+#'   (NBE, COC) — the two sources confirmed by real spatial-filter feature
 #'   counts (not just bounding-box overlap — that check gave false
-#'   positives for both sources during development) to cover every CELESTE
-#'   group with harvest/regen data available. COC/MOR sites get no
-#'   coverage from either and are silently excluded downstream by the
-#'   hydroweight module's existing "all NA after crop/mask" check, same
-#'   pattern as the NDVI/NBE gap this fills.
+#'   positives for both sources during development, for every one of
+#'   NBE/COC/MOR) to cover every CELESTE group with harvest/regen data
+#'   available. MOR gets zero coverage from either source (confirmed the
+#'   same way) and is silently excluded downstream by the hydroweight
+#'   module's existing "all NA after crop/mask" check, same pattern as the
+#'   NDVI/NBE gap this fills.
 #'
 #' @return Character vector of the (existing-or-newly-written) per-group
 #'   raster paths, invisibly.
@@ -197,12 +210,14 @@ prepare_harvest_regen_rasters <- function(
       buckets = list(
         harvest = c("Harvest_CC02", "Harvest_CC17"),
         regen   = c("Regen_Seed", "Regen_Natural", "Regen_Plant")
-      )
+      ),
+      year_range = c(2002, 2024)
     ),
     nb = list(
-      groups = "NBE",
+      groups = c("NBE", "COC"),
       gdb_path = here::here("data/irving_harvest/LB_HarvCuHi_RefCuHi_SICuHi.gdb"),
-      buckets = NULL # resolved below via stage_nb_harvest_regen()
+      buckets = NULL, # resolved below via stage_nb_harvest_regen()
+      year_range = c(2002, 2024)
     )
   )
 ) {
@@ -227,6 +242,7 @@ prepare_harvest_regen_rasters <- function(
         buckets = buckets,
         gdb_path = if (is.null(src$buckets)) NULL else gdb_path,
         template = grp_template,
+        year_range = src$year_range,
         crop_to = grp_aoi
       )
       terra::writeRaster(
