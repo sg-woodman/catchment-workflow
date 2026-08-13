@@ -174,6 +174,29 @@ sens_slope_trend <- function(r, x = NULL, min_obs = 4, cores = 1) {
   out
 }
 
+#' Match a group's own regional source tiles by filename
+#'
+#' Case-insensitive match on group_id as a filename token, with an optional
+#' "Celeste_" prefix and an optional trailing tile number (e.g. "NIP1"..
+#' "NIP5", "KEN1".."KEN4") — the naming convention across CELESTE's
+#' data/ndvi/*.tif tiles (verified via check_tile_consistency()). Used to
+#' mosaic ONLY a group's own tiles rather than cropping a shared multi-
+#' region VRT — see prepare_ndvi_trend_rasters() and
+#' prepare_ndvi_per_group_rasters() in workflow/CELESTE/ for why this
+#' matters for runtime, not just tidiness (a crop from a much larger VRT
+#' measured ~3x slower for the same real data, purely from GDAL considering
+#' far more candidate source tiles than necessary).
+#'
+#' @param files Character vector of candidate tile file paths.
+#' @param group_id Character. Group identifier to match.
+#' @return Character vector of matching file paths (possibly empty, if this
+#'   group has no tiles — a real, expected gap for some groups/sources, not
+#'   an error condition on its own).
+match_group_tiles <- function(files, group_id) {
+  pat <- sprintf("(?i)_(Celeste_)?%s[0-9]*[.]tif$", group_id)
+  files[grepl(pat, files, perl = TRUE)]
+}
+
 # -- Mosaic VRT construction ---------------------------------------------------
 
 #' Check that a set of raster tiles are safe to mosaic together
