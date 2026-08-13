@@ -452,7 +452,17 @@ process_hw_site_stream <- function(
     return(NULL)
   }
 
-  site_catch_sf <- sf::st_read(catchment_path, quiet = TRUE)
+  # st_make_valid() defensively — hydroweight::hydroweight() does its own
+  # internal GEOS geometry processing (union/buffer/etc. against the clip
+  # region) and a self-touching artifact in a raster-to-polygon conversion
+  # upstream (watershed_to_polygon() in 05_delineate_sites.R) is enough to
+  # trip a "TopologyException: side location conflict" there even though
+  # the polygon reads back fine on its own. Confirmed directly: 3 sites
+  # (NBI1/NBI4/NBI5, unclipped version only — the largest unclipped
+  # catchments in their group, so most likely to reach whatever pixel
+  # produces the artifact) failed with this exact error at the identical
+  # coordinate until this fix was added.
+  site_catch_sf <- sf::st_read(catchment_path, quiet = TRUE) |> sf::st_make_valid()
   pour_point_sf <- sf::st_read(pour_point_path, quiet = TRUE)
 
   hw_site_dir <- fs::path(hw_dir, site_id, version)
