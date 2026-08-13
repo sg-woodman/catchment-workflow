@@ -58,6 +58,13 @@ library(glue)
 library(here)
 
 # -- Source modules -------------------------------------------------------------
+# Core, standardized modules (shared across every project on this workflow/
+# layout — stream, lake, and any future project) live under workflow/R/ and
+# workflow/raster_attributes.R. CELESTE-specific data prep (this runner and
+# its LOI prepare_*.R scripts) lives under workflow/CELESTE/ instead, kept
+# physically separate so another project (e.g. CAM lakes) can have its own
+# prepare_*.R scripts without the two ever colliding or needing to agree on
+# project-specific details.
 source(here("workflow/R/utils.R"))
 source(here("workflow/R/stream/01_group_sites.R"))
 source(here("workflow/R/stream/02_prepare_dem.R"))
@@ -71,8 +78,9 @@ source(here("workflow/R/07_reclip_outputs.R"))
 source(here("workflow/R/08_catchment_metrics.R"))
 source(here("code/reset_workflow.R"))
 source(here("workflow/raster_attributes.R")) # reclassify_categorical(), sens_slope_trend(), rasterize_competing_classes() — used ad hoc to prepare LOI rasters below, not part of Stages 1-9
-source(here("workflow/prepare_ndvi.R")) # prepare_ndvi_vrt() — NDVI (continuous) LOI prep, see Stage 9
-source(here("workflow/prepare_harvest_regen.R")) # prepare_harvest_regen_rasters() — Ontario harvest/regen (categorical) LOI prep, see Stage 9
+source(here("workflow/CELESTE/prepare_ndvi.R")) # prepare_ndvi_vrt() — NDVI (continuous) LOI prep, see Stage 9
+source(here("workflow/CELESTE/prepare_ndvi_trend.R")) # prepare_ndvi_trend_rasters() — NDVI Sen's-slope trend (continuous) LOI prep, see Stage 9
+source(here("workflow/CELESTE/prepare_harvest_regen.R")) # prepare_harvest_regen_rasters() — Ontario/NB harvest/regen (categorical) LOI prep, see Stage 9
 
 # =============================================================================
 # CONFIGURATION
@@ -278,14 +286,16 @@ print(metrics)
 # runner and the generic hydroweight module. This block just calls each
 # one and gets back a path to feed into loi_layers below.
 #
-#   NDVI (continuous)        -> workflow/prepare_ndvi.R
-#   Harvest/regen (categorical, Ontario only) -> workflow/prepare_harvest_regen.R
+#   NDVI (continuous)                         -> workflow/CELESTE/prepare_ndvi.R
+#   NDVI trend (continuous, slope + p_value)  -> workflow/CELESTE/prepare_ndvi_trend.R
+#   Harvest/regen (categorical, Ontario + NB) -> workflow/CELESTE/prepare_harvest_regen.R
 #
-# To add another LOI, write a similar prepare_*.R script (reusing
-# workflow/raster_attributes.R's generic helpers where they fit) and call
-# it here the same way.
+# To add another LOI, write a similar prepare_*.R script under
+# workflow/CELESTE/ (reusing workflow/raster_attributes.R's generic helpers
+# where they fit) and call it here the same way.
 
-ndvi_vrt_path <- prepare_ndvi_vrt(cache_dir = cache_dir)
+prepare_ndvi_per_group_rasters(group_manifest, cache_dir = cache_dir)
+prepare_ndvi_trend_rasters(group_manifest, cache_dir = cache_dir) # slow — see that script's header
 prepare_harvest_regen_rasters(group_manifest, cache_dir = cache_dir)
 
 loi_layers <- list(
@@ -298,9 +308,24 @@ loi_layers <- list(
     class_levels = harvest_regen_levels
   ),
   list(
-    path_lazy = ndvi_vrt_path,
+    path_lazy = here(
+      "cache", PROJECT_ID, "hydroweight_loi", "ndvi", "{group_id}.tif"
+    ),
     name = "ndvi",
-    type = "continuous"
+    type = "continuous",
+    # sum/cell_count/NA_cell_count are meaningless for this analysis (per
+    # user request) — excluded from computation entirely, not just hidden
+    # from output (see run_loi_attributes_stream_multilayer_continuous()'s
+    # numeric_stats param).
+    stats = c("distwtd_mean", "distwtd_sd", "mean", "sd", "median", "min", "max")
+  ),
+  list(
+    path_lazy = here(
+      "cache", PROJECT_ID, "hydroweight_loi", "ndvi_trend", "{group_id}.tif"
+    ),
+    name = "ndvi_trend",
+    type = "continuous",
+    stats = c("distwtd_mean", "distwtd_sd", "mean", "sd", "median", "min", "max")
   )
 )
 
