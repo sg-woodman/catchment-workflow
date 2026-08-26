@@ -1,0 +1,409 @@
+# Rerun delineation for specific sites after a correction ----
+#
+# Two distinct correction scenarios, each needing a different re-delineation
+# starting point:
+#
+#   1. The RAW COORDINATE was wrong and has been fixed in the sites source
+#      (e.g. the sites CSV) — the site needs to be fully re-snapped from its
+#      new lon/lat. Use rerun_engine_sites(resnap_site_ids = ...).
+#
+#   2. The SNAPPED pour point was wrong (mis-snapped to the wrong stream
+#      cell) and has been manually corrected by editing
+#      output/<site_id>/pour_point_snapped.shp in QGIS directly — the raw
+#      coordinate itself is fine, and re-snapping would just overwrite the
+#      manual correction. Use rerun_engine_sites(edited_snap_site_ids = ...),
+#      which calls rerun_engine_site_watershed() (below) instead — mirrors
+#      workflow/R/stream/99_rerun_sites's rerun_site_watershed(), CRS-dynamic
+#      instead of hardcoded EPSG:3979.
+#
+# rerun_engine_sites() handles both in one call, then re-runs the shared
+# downstream stages (remove-upstream, reclip, metrics, hydroweight) —
+# scoped to just the affected sites, not the whole project, and MERGED into
+# the existing combined outputs (catchment_metrics.csv, the hydroweight
+# CSV) rather than overwriting them wholesale, since those writers
+# (write_metrics_outputs(), the write_csv() call in run_cam_streams.R) do a
+# plain overwrite with whatever `sites` subset they're given.
+#
+# remove_upstream_catchments() always runs against the FULL sites list
+# (cheap — pure vector geometry, no raster I/O) since a changed site's
+# shape can change which OTHER sites it's nested within/erases — reclip/
+# metrics/hydroweight then also pick up any such cascaded neighbor, not
+# just the site(s) you named, detected by checking whose erased_site_ids
+# changed.
+#
+# Requires already sourced: workflow/R/utils.R, code/reset_workflow.R
+# (reset_site()), workflow/R/stream/05_delineate_sites.R (load_group_
+# rasters(), delineate_watershed(), clip_rasters_to_catchment(),
+# clip_flowlines_to_catchment()), workflow/R/engine/00-04, workflow/R/
+# 06_remove_upstream.R, 07_reclip_outputs.R, 08_catchment_metrics.R, and
+# (if loi_layers is supplied) workflow/R/stream/06_hydroweight_
+# attributes.R.
+
+#' Rerun watershed delineation for a single site from an edited snapped
+#' pour point
+#'
+#' Use after manually editing output/<site_id>/pour_point_snapped.shp in
+#' QGIS to correct a misaligned snap. Redoes watershed delineation, polygon
+#' conversion, and raster clipping — does NOT rewrite pour_point.shp or
+#' rerun the snapping step; it reads the edited pour_point_snapped.shp
+#' directly, same contract as workflow/R/stream/99_rerun_sites's
+#' rerun_site_watershed(), CRS-dynamic (config$working_crs) instead of
+#' hardcoded EPSG:3979.
+#'
+#' @param site_id        Character. Site identifier
+#' @param sites          Validated sites tibble (with group_id) from
+#'   build_engine_group_manifest()
+#' @param group_manifest sf tibble from build_engine_group_manifest()
+#' @param config         Resolved config from resolve_engine_config()
+#' @param output_dir     Character. Root output directory
+#' @param min_cells      Integer. Minimum cells threshold for flagging.
+#'   Default 10.
+#'
+#' @return Single-row tibble with delineation result for this site
+rerun_engine_site_watershed <- function(
+  site_id, sites, group_manifest, config, output_dir, min_cells = 10
+) {
+  site_dir <- site_output_dir(output_dir, site_id)
+  snapped_shp <- fs::path(site_dir, "pour_point_snapped.shp")
+
+  if (!fs::file_exists(snapped_shp)) {
+    cw_abort(glue::glue(
+      "Site '{site_id}': pour_point_snapped.shp not found at {site_dir}. ",
+      "Has this site been delineated yet?"
+    ))
+  }
+
+  site <- dplyr::filter(sites, site_id == !!site_id)
+  if (nrow(site) == 0) {
+    cw_abort(glue::glue("Site '{site_id}' not found in sites tibble."))
+  }
+
+  grp <- site$group_id[1]
+  grp_manifest <- dplyr::filter(group_manifest, group_id == grp)
+  grp_cache <- grp_manifest$cache_dir
+
+  cw_inform(glue::glue(
+    "Site '{site_id}': rerunning watershed delineation with edited pour point..."
+  ))
+
+  group_rasters <- load_group_rasters(grp_cache, grp)
+
+  tryCatch(
+    {
+      watershed_tif <- delineate_watershed(
+        snapped_shp = snapped_shp, flow_pointer = group_rasters$flow_pointer,
+        site_dir = site_dir, site_id = site_id
+      )
+
+      catchment_sf <- watershed_to_polygon_dynamic(
+        watershed_tif = watershed_tif, site_dir = site_dir, site_id = site_id,
+        working_crs = config$working_crs
+      )
+
+      watershed_rast <- terra::rast(watershed_tif)
+      n_cells <- sum(terra::values(watershed_rast) == 1, na.rm = TRUE)
+      res_m <- terra::res(group_rasters$flow_accum)[1]
+      km2 <- round((n_cells * res_m^2) / 1e6, 4)
+
+      flagged <- n_cells < min_cells
+      flag_reason <- if (flagged) {
+        glue::glue(
+          "catchment is only {n_cells} cells ({km2} km2) — ",
+          "pour point may have snapped to wrong location"
+        )
+      } else {
+        NA_character_
+      }
+      if (flagged) {
+        cw_warn(glue::glue("Site '{site_id}': {flag_reason}"))
+      } else {
+        cw_inform(glue::glue("Site '{site_id}': catchment = {n_cells} cells ({km2} km2)."))
+      }
+
+      catchment_sf <- catchment_sf |>
+        dplyr::mutate(site_id = site_id, n_cells = n_cells, area_km2 = km2, flagged = flagged)
+
+      snapped_sf <- sf::st_read(snapped_shp, quiet = TRUE) |>
+        sf::st_transform(config$working_crs) |>
+        dplyr::mutate(site_id = site_id)
+      sf::st_write(snapped_sf, fs::path(site_dir, "pour_point.gpkg"), delete_dsn = TRUE, quiet = TRUE)
+
+      sf::st_write(catchment_sf, fs::path(site_dir, "catchment.gpkg"), delete_dsn = TRUE, quiet = TRUE)
+
+      # Force overwrite — clip_rasters_to_catchment()'s own cache_exists()
+      # check would otherwise skip these since they already exist from the
+      # original run.
+      raster_files <- fs::path(site_dir, paste0(names(group_rasters), ".tif"))
+      fs::file_delete(raster_files[fs::file_exists(raster_files)])
+
+      clip_rasters_to_catchment(
+        catchment_sf = catchment_sf, group_rasters = group_rasters,
+        site_dir = site_dir, site_id = site_id
+      )
+
+      # Only re-clip NHN flowlines if this group actually has burned-in
+      # flowlines cached (whole_domain/OIH-style runs with no burn-in have
+      # nothing to clip) — same condition delineate_engine_point_site() uses.
+      flowlines_path <- fs::path(grp_cache, "flowlines.gpkg")
+      if (cache_exists(flowlines_path)) {
+        streams_path <- fs::path(site_dir, "streams.gpkg")
+        if (fs::file_exists(streams_path)) fs::file_delete(streams_path)
+        clip_flowlines_to_catchment(
+          catchment_sf = catchment_sf, flowlines_path = flowlines_path,
+          site_dir = site_dir, site_id = site_id
+        )
+      }
+
+      cw_inform(glue::glue("Site '{site_id}': rerun complete."))
+
+      tibble::tibble(
+        site_id = site_id, status = "rerun success", catchment_cells = n_cells,
+        catchment_km2 = km2, flagged = flagged, flag_reason = flag_reason
+      )
+    },
+    error = function(e) {
+      cw_warn(glue::glue("Site '{site_id}': rerun failed — {e$message}"))
+      tibble::tibble(
+        site_id = site_id, status = paste("rerun failed:", e$message),
+        catchment_cells = NA_integer_, catchment_km2 = NA_real_,
+        flagged = TRUE, flag_reason = e$message
+      )
+    }
+  )
+}
+
+#' Rerun the full downstream pipeline for specific sites after a correction
+#'
+#' Handles both correction scenarios (raw coordinate fix vs. edited snapped
+#' point), then re-runs remove-upstream (full sites list, cheap), reclip,
+#' metrics, and (if loi_layers given) hydroweight for just the affected
+#' sites — including any OTHER site whose clipped catchment changed as a
+#' cascading side effect (detected from remove_upstream_catchments()'s own
+#' erased_site_ids column) — merging results into the existing combined
+#' outputs rather than overwriting them.
+#'
+#' @param resnap_site_ids      Character vector. Sites whose raw lon/lat
+#'   changed — reset and fully re-delineated (re-snap from scratch).
+#' @param edited_snap_site_ids Character vector. Sites whose
+#'   pour_point_snapped.shp was manually edited — rerun from that point
+#'   directly via rerun_engine_site_watershed(), no re-snap.
+#' @param sites          Validated sites tibble (current — e.g. re-read
+#'   from the sites CSV after fixing a coordinate) from
+#'   build_engine_group_manifest()
+#' @param group_manifest sf tibble from build_engine_group_manifest()
+#' @param config         Resolved config from resolve_engine_config()
+#' @param output_dir     Character. Root output directory
+#' @param cache_dir      Character. Root cache directory (only needed if
+#'   loi_layers is supplied)
+#' @param loi_layers     LOI layers list (same shape as
+#'   calculate_hydroweight_attributes_stream()'s), or NULL to skip
+#'   re-running hydroweight entirely.
+#' @param snap_dist      Numeric. Passed to delineate_engine_catchments()
+#'   for resnap_site_ids. Default 200.
+#' @param min_cells      Integer. Minimum cells threshold for flagging.
+#'   Default 10.
+#'
+#' @return Character vector of all sites actually re-run downstream
+#'   (resnap_site_ids + edited_snap_site_ids + any cascaded neighbor)
+rerun_engine_sites <- function(
+  resnap_site_ids = character(0),
+  edited_snap_site_ids = character(0),
+  sites, group_manifest, config, output_dir, cache_dir = NULL,
+  loi_layers = NULL, snap_dist = 200, min_cells = 10
+) {
+  target_ids <- union(resnap_site_ids, edited_snap_site_ids)
+  if (length(target_ids) == 0) {
+    cw_abort("Supply at least one site in resnap_site_ids or edited_snap_site_ids.")
+  }
+
+  # -- Delineation: resnap (full re-derivation from current lon/lat) --------
+  if (length(resnap_site_ids) > 0) {
+    purrr::walk(resnap_site_ids, function(sid) reset_site(sid, output_dir))
+    # Full sites list is safe/cheap here — delineate_engine_point_site()
+    # skips any site whose catchment.gpkg already exists, so this only
+    # does real work for the just-reset site(s).
+    delineate_engine_catchments(
+      config = config, sites = sites, group_manifest = group_manifest,
+      snap_dist = snap_dist, min_cells = min_cells
+    )
+  }
+
+  # -- Delineation: edited snapped point (no re-snap) ------------------------
+  if (length(edited_snap_site_ids) > 0) {
+    purrr::walk(edited_snap_site_ids, function(sid) {
+      rerun_engine_site_watershed(sid, sites, group_manifest, config, output_dir, min_cells)
+    })
+  }
+
+  # -- Rebuild the combined all_catchments.gpkg -------------------------------
+  # Each site's own catchment.gpkg is now current, but the COMBINED file
+  # (built once in run_cam_streams.R's Stage 3, never touched again there)
+  # isn't updated by anything above — confirmed stale after a rerun without
+  # this: it kept the target site's ORIGINAL catchment (e.g. a mis-snapped
+  # 1-cell Bell) even after a correct rerun updated catchment.gpkg itself.
+  # all_catchments_clipped.gpkg doesn't need the same treatment — it's
+  # already rebuilt every time inside remove_upstream_catchments() below.
+  combine_all_catchments(sites, output_dir)
+
+  # -- Remove upstream: always the FULL sites list ---------------------------
+  # Cheap (pure vector geometry), and a changed site's shape can change
+  # which OTHER sites it's nested within/erases — must be recomputed
+  # globally for correctness, not just for target_ids.
+  upstream_results <- remove_upstream_catchments(sites, output_dir)
+
+  # -- Detect cascaded neighbors: any OTHER site whose erased_site_ids
+  # includes one of target_ids had its clipped catchment boundary change.
+  cascaded <- upstream_results |>
+    dplyr::filter(!is.na(erased_site_ids)) |>
+    dplyr::filter(purrr::map_lgl(
+      strsplit(erased_site_ids, ",\\s*"),
+      function(ids) any(trimws(ids) %in% target_ids)
+    )) |>
+    dplyr::pull(site_id)
+  cascaded <- setdiff(cascaded, target_ids)
+
+  affected <- union(target_ids, cascaded)
+  if (length(cascaded) > 0) {
+    cw_inform(glue::glue(
+      "Also re-running downstream neighbor(s) whose clipped catchment ",
+      "depends on the changed site(s): {paste(cascaded, collapse = ', ')}"
+    ))
+  }
+
+  affected_sites <- dplyr::filter(sites, site_id %in% affected)
+
+  # -- Reclip: just the affected sites ---------------------------------------
+  reclip_outputs(sites = affected_sites, output_dir = output_dir, group_manifest = group_manifest)
+
+  # -- Metrics: just the affected sites, MERGED into catchment_metrics.csv,
+  # dropping any now-redundant "clipped" row. filter_fn runs on the FULL
+  # merged result (using the FULL upstream_results, covering every site,
+  # not just `affected`) so it also cleans up a stale duplicate left over
+  # from before this rerun, for any site — not only the ones just
+  # recomputed.
+  new_metrics <- calculate_catchment_metrics(sites = affected_sites, output_dir = output_dir)
+  merge_rows_into_csv(
+    new_metrics, fs::path(output_dir, "catchment_metrics.csv"),
+    key_cols = c("site_id", "version"),
+    filter_fn = function(df) drop_redundant_clipped_rows(df, upstream_results, "site_id")
+  )
+
+  # -- Hydroweight: just the affected sites, MERGED into the hydroweight CSV -
+  if (!is.null(loi_layers)) {
+    if (is.null(cache_dir)) {
+      cw_abort("cache_dir is required when loi_layers is supplied.")
+    }
+    new_hw <- calculate_hydroweight_attributes_stream(
+      sites = affected_sites, group_manifest = group_manifest,
+      output_dir = output_dir, cache_dir = cache_dir, loi_layers = loi_layers,
+      catchment_versions = c("unclipped", "clipped"), raster_crs = config$working_crs
+    )
+    merge_rows_into_csv(
+      new_hw,
+      fs::path(output_dir, paste0(config$project_id, "_hydroweight.csv")),
+      key_cols = c("site", "version"),
+      filter_fn = function(df) drop_redundant_clipped_rows(df, upstream_results, "site")
+    )
+  } else {
+    cw_inform("loi_layers not supplied — hydroweight CSV left untouched. Re-run manually if needed.")
+  }
+
+  cw_inform(glue::glue("rerun_engine_sites() complete for: {paste(affected, collapse = ', ')}"))
+  invisible(affected)
+}
+
+#' Rebuild the combined all_catchments.gpkg from every site's own
+#' catchment.gpkg
+#'
+#' Mirrors the inline logic in run_cam_streams.R's Stage 3 — needed here
+#' too, since rerun_engine_sites() only writes/updates individual sites'
+#' catchment.gpkg, never the combined file, on its own.
+#'
+#' @param sites      Sites tibble (site_id column)
+#' @param output_dir Character. Root output directory
+#' @return Invisibly, the path written to
+combine_all_catchments <- function(sites, output_dir) {
+  out_path <- fs::path(output_dir, "all_catchments.gpkg")
+
+  all_catchments <- purrr::map(sites$site_id, function(sid) {
+    p <- fs::path(site_output_dir(output_dir, sid), "catchment.gpkg")
+    if (!cache_exists(p)) {
+      return(NULL)
+    }
+    sf::st_read(p, quiet = TRUE)
+  }) |>
+    purrr::compact() |>
+    dplyr::bind_rows()
+
+  sf::st_write(all_catchments, out_path, delete_dsn = TRUE, quiet = TRUE)
+  cw_inform(glue::glue("Combined {nrow(all_catchments)} catchment(s) -> {out_path}"))
+  invisible(out_path)
+}
+
+#' Drop "clipped" rows for sites whose clipped catchment is identical to
+#' its unclipped parent, keeping only the "unclipped" row for those sites
+#'
+#' A site with no nested upstream catchments (n_erased == 0 in
+#' remove_upstream_catchments()'s result) gets an unchanged copy of its
+#' catchment written as catchment_clipped.gpkg — the "clipped" version row
+#' in an output table (catchment_metrics.csv, the hydroweight CSV) is then
+#' pure duplication of the "unclipped" row and not worth keeping.
+#'
+#' Deliberately keyed off n_erased == 0 (remove_upstream_catchments()'s own
+#' signal for "nothing was actually erased"), NOT a numeric comparison of
+#' the two rows' values — the clipped geometry is round-tripped through a
+#' fixed EPSG:3979 working CRS and back (see workflow/R/06_remove_upstream.R)
+#' even when nothing is erased, so downstream metrics/hydroweight values
+#' for a genuinely-identical site can differ from their unclipped
+#' counterpart by floating-point noise, which a numeric equality check
+#' would incorrectly treat as "different".
+#'
+#' @param df               Data frame/tibble with a `version` column
+#'   ("unclipped"/"clipped") and a site identifier column
+#' @param upstream_results Result tibble from remove_upstream_catchments()
+#'   (has site_id, n_erased columns)
+#' @param site_col         Character. Name of df's site identifier column
+#'   — "site_id" for catchment_metrics.csv, "site" for the hydroweight
+#'   output (calculate_hydroweight_attributes_stream() names it that way).
+#' @return df with redundant "clipped" rows removed
+drop_redundant_clipped_rows <- function(df, upstream_results, site_col) {
+  identical_ids <- upstream_results$site_id[
+    !is.na(upstream_results$n_erased) & upstream_results$n_erased == 0
+  ]
+  dplyr::filter(df, !(.data[[site_col]] %in% identical_ids & version == "clipped"))
+}
+
+#' Merge new rows into an existing CSV, replacing any existing row that
+#' shares a key with a new row (by key_cols) — never a wholesale overwrite.
+#'
+#' @param new_rows Data frame/tibble of rows to merge in
+#' @param csv_path Character. Path to the CSV (created if it doesn't exist)
+#' @param key_cols Character vector of column names identifying a unique
+#'   row (e.g. c("site_id", "version"))
+#' @param filter_fn Optional function applied to the FULL combined result
+#'   (existing rows kept + new_rows), right before writing — e.g.
+#'   drop_redundant_clipped_rows(). Applied post-merge, not to new_rows
+#'   alone, so it also cleans up a stale redundant row already sitting in
+#'   csv_path from a previous run whose key isn't present in new_rows at
+#'   all (anti_join() only touches keys new_rows actually has).
+#' @return The merged (and filtered, if filter_fn given) tibble, invisibly.
+#'   Called for side effects (writes csv_path).
+merge_rows_into_csv <- function(new_rows, csv_path, key_cols, filter_fn = NULL) {
+  if (fs::file_exists(csv_path)) {
+    existing <- readr::read_csv(csv_path, show_col_types = FALSE)
+    existing_kept <- dplyr::anti_join(existing, new_rows, by = key_cols)
+    combined <- dplyr::bind_rows(existing_kept, new_rows)
+  } else {
+    combined <- new_rows
+  }
+
+  if (!is.null(filter_fn)) {
+    combined <- filter_fn(combined)
+  }
+
+  readr::write_csv(combined, csv_path)
+  cw_inform(glue::glue(
+    "Merged {nrow(new_rows)} updated row(s) into {csv_path} ({nrow(combined)} total)."
+  ))
+  invisible(combined)
+}
