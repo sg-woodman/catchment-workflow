@@ -14,12 +14,15 @@ All code is plain R scripts sourced interactively — there is no build system, 
 
 ## Running the workflow
 
-There is one runner per project, both on the shared `workflow/` layout:
+There is one runner per project:
 
-- `workflow/CELESTE/run_celeste.R` — CELESTE stream/river sites
-- `workflow/run_cam_lakes.R` — CAM lake sites
+- `workflow/CELESTE/run_celeste.R` — CELESTE stream/river sites, on the `workflow/R/stream/` pipeline (MRDEM + HydroBasins grouping + NHN burn-in, EPSG:3979)
+- `workflow/run_cam_lakes.R` — CAM lake sites, on the `workflow/R/lake/` pipeline (OIH DEM/flow direction, lake-polygon pour points, EPSG:3161)
+- `workflow/CAM/run_cam_streams.R` — CAM stream sites, on the modular `workflow/R/engine/` pipeline (OIH DEM/flow direction — same physical data as CAM lakes — but point pour points and no HydroBasins grouping)
 
-CELESTE-specific data-prep scripts (the runner and its `prepare_*.R` LOI scripts) live under `workflow/CELESTE/`, physically separate from the core `workflow/R/` module tree and from `workflow/raster_attributes.R` (the generic, project-agnostic toolbox) — keeps one project's data-prep quirks from ever needing to be reconciled with another's. CAM lakes doesn't have an equivalent subdirectory yet; add one (`workflow/CAM/`) if/when its LOI prep grows past `run_cam_lakes.R` itself.
+The third pattern above (`workflow/R/engine/`) is a generalized, input-driven delineation engine: it runs off whatever terrain inputs a project actually supplies (raw DEM needing breach, or an already-conditioned flow direction/pointer like OIH's), resolves its working CRS from that input at runtime instead of a hardcoded per-project constant, and derives its `group_manifest` via a pluggable grouping strategy (`"whole_domain"` — one flat group, e.g. OIH; `"hydrobasins"` — CELESTE's existing per-region logic, reused unmodified). See `workflow/R/engine/00_resolve_config.R`'s file header for the full config schema, and `workflow/templates/run_engine_template.R` for a blank, `TODO`-annotated skeleton to copy for a new project. `workflow/R/stream/` and `workflow/R/lake/` are untouched by this — CELESTE and CAM lakes keep running exactly as they do today; migrating them onto the engine is a deliberate, not-yet-done future step.
+
+CELESTE-specific data-prep scripts (the runner and its `prepare_*.R` LOI scripts) live under `workflow/CELESTE/`, physically separate from the core `workflow/R/` module tree and from `workflow/raster_attributes.R` (the generic, project-agnostic toolbox) — keeps one project's data-prep quirks from ever needing to be reconciled with another's. `workflow/CAM/` holds `run_cam_streams.R` for the same reason. CAM lakes doesn't have an equivalent subdirectory yet; add one (`workflow/CAM_lakes/` or similar) if/when its own LOI prep grows past `run_cam_lakes.R` itself.
 
 Each is sourced interactively in R (or run section-by-section), not executed as a CLI script.
 
@@ -74,6 +77,21 @@ Stream/river-specific modules live in `workflow/R/stream/`; lake-specific module
 | `07_reclip_outputs.R` | Re-clips all rasters and flowlines to the clipped catchment polygon → `*_clipped.tif` / `streams_clipped.gpkg`. Shared — works for stream (`group_manifest`) or lake (`cache_dir`) projects |
 | `08_catchment_metrics.R` | Computes geometry, areal, relief, and (when applicable) lake/stream morphometric metrics following Shekar & Mathew (2024), for both unclipped and clipped catchments |
 
+### The engine (`workflow/R/engine/`) — modular, input-driven delineation
+
+A third module tree, alongside (not replacing) `workflow/R/stream/` and `workflow/R/lake/`, used currently only by `workflow/CAM/run_cam_streams.R`. Runs off whatever terrain a project's config supplies rather than assuming a fixed project-specific pipeline:
+
+| File | Purpose |
+|---|---|
+| `engine/00_resolve_config.R` | Validates a `run_config` list, resolves which terrain tier is usable (`flow_pointer` > `flow_direction` > `dem`, highest-conditioning wins), and resolves the working CRS — `config$crs = NULL` (default) matches the terrain tier's own native CRS (no reprojection); an explicit `config$crs = "EPSG:####"` overrides it, and `02_prepare_terrain.R` reprojects every terrain raster to match. Either way, `check_crs_suitability()` warns (not aborts) if the resulting working CRS is geographic (degrees) or not metre-based — WhiteboxTools' flow algorithms and this workflow's own distance/area logic (breach distance, buffer widths, cell-count thresholds) assume a projected, metre-based CRS. |
+| `engine/01_build_group_manifest.R` | Builds the same `group_manifest` shape CELESTE uses, via a pluggable `grouping$strategy`: `"whole_domain"` (one trivial group — the whole terrain extent, no cropping, formalizing what `run_cam_lakes.R` already does) or `"hydrobasins"` (delegates to `stream/01_group_sites.R`'s existing logic unmodified). |
+| `engine/02_prepare_terrain.R` | Conditional terrain prep per group: crops+uses `flow_pointer` directly, or crops+recodes `flow_direction` (generic `path` + `recode` matrix — OIH's rotation table is just one config value, not special-cased in code), or crops a raw `dem` and runs breach + D8 pointer (calling `03_prepare_streams_burn.R` first if `streams_burn` is configured). Always materializes the same canonical per-group filenames `stream/05_delineate_sites.R` and `stream/06_hydroweight_attributes.R` already expect (`dem_breached.tif`, `flow_pointer.tif`, `flow_accum.tif`, `streams.tif`, `hillshade.tif`), so those two files are reused completely unmodified regardless of terrain source. |
+| `engine/03_prepare_streams_burn.R` | Resolves `streams_burn$source`: `"nhn_auto"` (real NHN FTP auto-downloader, `download_nhn()`, ported from the predecessor project `/Users/sam/Documents/cfs/catchment_delineation`), `"supplied"` (a given vector path), or `"none"`. Only applies to the raw-`dem` terrain tier — burning has to happen before flow direction is derived. |
+| `engine/04_delineate_site.R` | One delineation entry point, branching on `lake_polygons` (point pour point / Jenson snap if `NULL`, reusing `stream/05_delineate_sites.R`'s CRS-generic building blocks verbatim; lake-polygon pour point otherwise, adapted from `lake/03_delineate_lakes.R`, same no-trim-before-`wbt_watershed()` rule preserved). |
+| `engine/99_rerun_sites` | `rerun_engine_site_watershed()` — engine equivalent of `stream/99_rerun_sites`'s `rerun_site_watershed()` (rerun from a manually-edited `pour_point_snapped.shp`, CRS-dynamic). `rerun_engine_sites()` — higher-level orchestrator: handles both a raw-coordinate fix (`resnap_site_ids`, via `code/reset_workflow.R`'s `reset_site()` + full re-delineation) and an edited-snap fix (`edited_snap_site_ids`) in one call, then reruns remove-upstream (always the full sites list — cheap, and correctness requires it globally), reclip, metrics, and hydroweight scoped to just the affected sites plus any cascaded neighbor (detected via `remove_upstream_catchments()`'s own `erased_site_ids`), **merging** results into the existing combined CSVs (`merge_rows_into_csv()`, an `anti_join`-then-`bind_rows` by key columns) rather than overwriting them wholesale — `write_metrics_outputs()`/the hydroweight `write_csv()` call are plain overwrites, so a naive re-run on a subset would silently drop every other site's row. |
+
+`workflow/templates/run_engine_template.R` is a blank, `TODO`-annotated runner skeleton for the next project on this engine.
+
 ### Hydroweight (distance-weighted catchment attributes)
 
 Both projects use the `hydroweight` package to compute inverse-distance-weighted landscape attributes (e.g. % land cover, mean NDVI) under seven weighting schemes (`lumped`, `iEucO`, `iFLO`, `HAiFLO`, `iEucS`, `iFLS`, `HAiFLS`). The two pipelines differ only in what the "O" (outflow) target is:
@@ -98,7 +116,28 @@ Both projects use the `hydroweight` package to compute inverse-distance-weighted
 - `workflow/CELESTE/prepare_ndvi_trend.R` — `prepare_ndvi_trend_rasters()`, continuous, 2-band (`slope`, `p_value`). Per-pixel Theil-Sen slope + Mann-Kendall p-value across the full 1984-2025 NDVI series, via `sens_slope_trend()`. One raster per group, mosaicked from ONLY that group's own source NDVI tiles (regex-matched by group_id in the filename), not a crop of the full multi-province mosaic VRT (tiles span three widely-separated provinces — Ontario: KEN/NIP/TUR; New Brunswick: NBE/COC; PEI: MOR — confirmed by reprojecting each tile's extent to lon/lat; NOT transcontinental) — `sens_slope_trend()`'s cost is ~0.5 ms per *valid* pixel regardless of raster footprint (confirmed: single-tile groups and multi-tile mostly-NA mosaics landed within ~15% of the same per-valid-cell rate), so cropping a big mostly-NA mosaic to a group's AOI bounding box wastes time on padding — confirmed directly: COC's own 508K-cell tile took 248.5s, the same group cropped from the full VRT (80.7M cells, same valid-pixel count) took 752.9s, ~3x slower for zero additional signal. `cores > 1` was tested (NIP, `cores = 8`) and made this dramatically WORSE, not better — 2896.8s vs. 306.5s single-threaded, a ~9.5x regression — most likely `terra::app()`'s parallel path using a PSOCK cluster rather than fork, so each worker reloads packages and re-opens source tiles independently and every chunk is serialized over a socket, overhead that swamps the actual per-pixel work at this raster size. Stays single-threaded (`cores = 1`, the default) until that's investigated further. Measured total across all 6 CELESTE groups: ~29 min one-time (COC 248.5s, MOR 162.0s, TUR 226.3s, NIP 306.5s, NBE 673.7s, KEN 123.9s), cached to disk per group like harvest_regen.
 - `workflow/CELESTE/prepare_harvest_regen.R` — `prepare_harvest_regen_rasters()`, categorical. ONE LOI, TWO independent sources, each covering different groups: Ontario (`shared_data/raw/harvest/ontario_harvest.gdb`, NIP/TUR/KEN, `AR_YEAR` field) and New Brunswick/Irving (`data/irving_harvest/LB_HarvCuHi_RefCuHi_SICuHi.gdb`, NBE + COC, `HARVYR`/`RFYR` fields, staged/cleaned first — see `stage_nb_harvest_layer()`'s docstring for the two real data-quality issues it handles, found via the accompanying data dictionary xlsx). MOR was checked against both sources (real spatial-filter feature counts, not bbox overlap) and genuinely has zero coverage from either — stays excluded. Both sources restricted to `year_range = c(2002, 2024)` (Ontario's native range; NB's own record goes back to 1961, which would otherwise make its "combined" band reflect a much longer disturbance history and not be comparable). Both rasterize into the same `harvest_regen_levels` class scheme so they combine into one LOI. Rasterized once per group via `rasterize_competing_classes()` and cached (unlike the VRT, genuinely expensive to rebuild — see below).
 
-Write a new `prepare_*.R` script the same way for any future LOI.
+Write a new `prepare_*.R` script the same way for any future LOI. Same
+pattern for `workflow/CAM/run_cam_streams.R` (the engine-based CAM streams
+project), under `workflow/CAM/` for the same physical-separation reason:
+- `workflow/CAM/prepare_ndvi.R` / `prepare_ndvi_trend.R` — continuous NDVI
+  and its Sen's-slope trend, from per-catchment/group Google Earth Engine
+  exports (`data/ndvi/CAM/*.tif`, via `workflow/CAM/upload_catchments_to_gee.R`
+  + `workflow/gee_utils.R`) — one raw file can cover several adjacency-
+  grouped sites; `build_cam_ndvi_site_map()` resolves which file each site
+  actually needs and exposes it per-site via a symlink.
+- `workflow/CAM/prepare_harvest_regen.R` — `prepare_cam_harvest_regen_rasters()`,
+  categorical, Ontario MNR source only (`shared_data/raw/harvest/ontario_harvest.gdb`
+  — CAM's AOI has no NB/Irving relevance), single whole-domain group. Reads
+  its DEM template from CAM's *flat* `cache_dir` (no per-group subfolder —
+  see `workflow/R/engine/01_build_group_manifest.R`'s `"whole_domain"`
+  strategy), unlike CELESTE's `cache_dir/<group_id>/` reconstruction above.
+- `workflow/CAM/tidy_outputs.R` — not a LOI prep script, but the same
+  physical-separation reasoning: reshapes `catchment_metrics.csv` /
+  `CAM_streams_hydroweight.csv` into several small, purpose-shaped long
+  tables for plotting (one per LOI, `mean`/`sd`/`prop` as real columns,
+  not a generic melted `stat`/`value` pair — see the file's header for why).
+  The original wide CSVs are untouched and remain the design matrix for
+  statistical modelling.
 
 `workflow/R/lake/01-05` (match lake polygons → prepare OIH DEM → delineate → remove upstream → hydroweight attributes) are lake-only and used solely by `run_cam_lakes.R`.
 
