@@ -313,15 +313,32 @@ resolve_site_loi_raster <- function(loi_desc, site_id, group_id, catchment_sf, c
 
 #' Shared reprojection/caching/factor-level logic for one LOI raster
 #'
-#' @param crop_to Optional sf polygon (any CRS). If supplied, the raw raster
-#'   is cropped to this geometry (transformed to the raster's own CRS,
-#'   buffered by crop_buffer_m) BEFORE reprojecting — critical for large/
-#'   lazy sources (e.g. a mosaic VRT spanning a huge, mostly-empty extent)
-#'   so terra::project()/writeRaster() only ever touch a small window.
+#' @param crop_to Optional sf polygon, in a PROJECTED (metric) CRS — always
+#'   true in this workflow, since callers pass the site's catchment
+#'   polygon (already in raster_crs, itself required to be metric by
+#'   resolve_engine_config()'s check_crs_suitability()). Buffered by
+#'   crop_buffer_m in ITS OWN CRS first, then transformed to the raw
+#'   raster's CRS for the actual crop — critical for large/lazy sources
+#'   (e.g. a mosaic VRT spanning a huge, mostly-empty extent) so
+#'   terra::project()/writeRaster() only ever touch a small window. Buffer
+#'   MUST happen before the transform to raw's CRS, not after — if raw's
+#'   own CRS is geographic (degrees, e.g. a raw NDVI export in EPSG:4326),
+#'   buffering post-transform means "crop_buffer_m degrees", not metres —
+#'   confirmed directly: a 500 m buffer applied post-transform to a
+#'   geographic source produced a crop covering the ENTIRE raster instead
+#'   of one small catchment window (500 degrees engulfs any real-world
+#'   extent), silently producing a full-size "cropped" cache file per site
+#'   instead of a small one — 15 sites into a 38-site run this filled the
+#'   disk (~5 GB/site x 15 = ~77 GB) and crashed WhiteboxTools mid-write.
 #' @param crop_buffer_m Numeric. Buffer applied to crop_to before cropping,
-#'   in crop_to's units (metres for a projected CRS). Guards against edge
-#'   pixels being lost to grid-rotation effects if raw and raster_crs
-#'   differ. Default 500.
+#'   in crop_to's OWN units (metres — crop_to is always a projected/metric
+#'   CRS in this workflow). Guards against edge pixels being lost to
+#'   grid-rotation effects if raw and raster_crs differ. Default 500.
+#' @return A SpatRaster, or NULL if crop_to has no overlap with the source
+#'   raster's extent (a genuine no-coverage site) — callers (
+#'   resolve_site_loi_raster(), process_hw_site_stream()) already treat a
+#'   NULL LOI raster as "skip this LOI for this site", so this propagates
+#'   without further handling.
 prepare_one_loi_raster <- function(
   raw_path,
   cache_path,
@@ -338,8 +355,31 @@ prepare_one_loi_raster <- function(
 
     if (!is.null(crop_to)) {
       crop_geom <- crop_to |>
-        sf::st_transform(terra::crs(raw)) |>
-        sf::st_buffer(crop_buffer_m)
+        sf::st_buffer(crop_buffer_m) |>
+        sf::st_transform(terra::crs(raw))
+
+      # A site whose catchment genuinely falls outside the source raster's
+      # coverage (e.g. NDVI built for a different site set than the one
+      # actually being run) makes terra::crop() throw a hard "extents do
+      # not overlap" error, not just return an empty/NA raster — confirmed
+      # directly (CAM streams' SUD22, ~8 km outside the NDVI extent).
+      # Checked explicitly here, before cropping, so a genuine no-coverage
+      # site is skipped gracefully — same "return NULL, let the caller's
+      # existing NULL-handling drop this LOI for this site" pattern
+      # resolve_site_loi_raster() already uses for a missing source file —
+      # rather than crashing the entire run over one site's known gap.
+      crop_ext <- terra::ext(terra::vect(crop_geom))
+      raw_ext  <- terra::ext(raw)
+      x_overlap <- crop_ext$xmin <= raw_ext$xmax && crop_ext$xmax >= raw_ext$xmin
+      y_overlap <- crop_ext$ymin <= raw_ext$ymax && crop_ext$ymax >= raw_ext$ymin
+      if (!x_overlap || !y_overlap) {
+        cw_warn(glue::glue(
+          "LOI '{label}': crop region has no overlap with the source ",
+          "raster's extent — no coverage here. Skipping this LOI for this site."
+        ))
+        return(NULL)
+      }
+
       raw <- terra::crop(raw, terra::vect(crop_geom), snap = "out")
     }
 
