@@ -67,12 +67,26 @@ remove_upstream_catchments <- function(sites, output_dir) {
     "Catchment pool: {nrow(catchment_pool)} site(s) loaded."
   ))
 
+  # Erase/intersection math below runs in a fixed EPSG:3979 working CRS
+  # (build_catchment_pool() transforms every catchment to it) — but the
+  # WRITTEN catchment_clipped.gpkg must come back out in whatever CRS the
+  # rest of THIS project actually uses, not silently stay in 3979. Fine
+  # (a no-op) for a 3979-native project (CELESTE); a real, previously
+  # unhandled mismatch for any other working CRS — confirmed directly on
+  # CAM streams (EPSG:3161 catchments): catchment_clipped.gpkg came out in
+  # EPSG:3979, which then made every downstream terra::crop() against a
+  # 3161-native raster fail with "[crop] extents do not overlap" — the
+  # geometry was valid, just numerically in the wrong CRS relative to
+  # everything else.
+  native_crs <- attr(catchment_pool, "native_crs")
+
   # -- Steps 2-4: Clip each site's catchment ----------------------------------
   results <- purrr::map(sites$site_id, function(sid) {
     clip_site_catchment(
       site_id = sid,
       catchment_pool = catchment_pool,
-      output_dir = output_dir
+      output_dir = output_dir,
+      native_crs = native_crs
     )
   }) |>
     dplyr::bind_rows()
@@ -149,11 +163,20 @@ build_catchment_pool <- function(sites, output_dir) {
     ))
   }
 
-  # Ensure consistent CRS across all catchments before binding — catchment.gpkg
-  # outputs from 05_delineate_sites.R are written in EPSG:3979
+  # Capture the catchments' own native CRS (all sites in one project share
+  # one working CRS — EPSG:3979 for a CELESTE-style project, but not
+  # necessarily for others, e.g. EPSG:3161 for CAM streams) BEFORE
+  # transforming to a fixed EPSG:3979 working CRS for the erase/
+  # intersection math below — clip_site_catchment() transforms the final
+  # output back to this before writing, so catchment_clipped.gpkg always
+  # matches whatever CRS the rest of the project actually uses.
+  native_crs <- sf::st_crs(catchments[[1]])
+
   catchments <- purrr::map(catchments, sf::st_transform, crs = 3979)
 
-  dplyr::bind_rows(catchments)
+  pool <- dplyr::bind_rows(catchments)
+  attr(pool, "native_crs") <- native_crs
+  pool
 }
 
 # -- Single-site clipping ------------------------------------------------------
@@ -168,10 +191,16 @@ build_catchment_pool <- function(sites, output_dir) {
 #' @param site_id        Character. Focal site identifier
 #' @param catchment_pool sf polygon object from build_catchment_pool()
 #' @param output_dir     Character. Root output directory
+#' @param native_crs     crs object (from build_catchment_pool()'s
+#'   "native_crs" attribute) to transform the final clipped geometry back
+#'   to before writing — catchment_pool itself is in a fixed EPSG:3979
+#'   working CRS for the erase math, which may not match the project's
+#'   actual CRS. Defaults to EPSG:3979 (a no-op) if not supplied, for
+#'   backward compatibility with any caller that doesn't pass it.
 #'
 #' @return Single-row tibble with columns: site_id, status, n_erased,
 #'   erased_site_ids, area_km2_before, area_km2_after
-clip_site_catchment <- function(site_id, catchment_pool, output_dir) {
+clip_site_catchment <- function(site_id, catchment_pool, output_dir, native_crs = sf::st_crs(3979)) {
   site_dir <- site_output_dir(output_dir, site_id)
   out_path <- fs::path(site_dir, "catchment_clipped.gpkg")
 
@@ -264,6 +293,11 @@ clip_site_catchment <- function(site_id, catchment_pool, output_dir) {
           n_erased,
           geometry
         )
+
+      # Transform back to the project's actual working CRS before writing —
+      # the erase math above ran in a fixed EPSG:3979 CRS regardless of
+      # what CRS this project actually uses (see build_catchment_pool()).
+      clipped <- sf::st_transform(clipped, native_crs)
 
       sf::st_write(clipped, out_path, delete_dsn = TRUE, quiet = TRUE)
 
