@@ -1,7 +1,7 @@
 ---
 title: "Catchment Delineation Workflow"
-subtitle: "A modular R workflow for hydrological catchment delineation and morphometric analysis"
-author: "Sam Woodman. — Natural Resources Canada"
+subtitle: "A practical guide to the stream and lake delineation pipelines"
+author: "Sam Woodman — Natural Resources Canada"
 date: today
 format:
   html:
@@ -17,577 +17,1134 @@ format:
     embed-resources: true
     smooth-scroll: true
     number-sections: true
+    fig-width: 7.5
+    fig-height: 5.5
+  pdf:
+    toc: true
+    toc-depth: 3
+    number-sections: true
+    documentclass: article
+    fig-pos: "H"
+    fig-width: 6.5
+    fig-height: 4.8
+    geometry:
+      - margin=2.5cm
 execute:
-  eval: false
   echo: true
   warning: false
   message: false
+  cache: true
 ---
 
 ```{r}
 #| label: setup
 #| include: false
+#| cache: false
+
 library(sf)
 library(terra)
-library(whitebox)
 library(dplyr)
 library(tidyr)
 library(purrr)
+library(stringr)
+library(forcats)
 library(readr)
 library(tibble)
-library(fs)
-library(cli)
-library(glue)
+library(ggplot2)
+library(tidyterra)
 library(gt)
+library(scales)
+library(patchwork)
+
+# This document is read-only with respect to the workflow: every figure and
+# table below loads files that already exist under cache/ and output/ from a
+# completed run of workflow/CELESTE/run_celeste.R and workflow/run_cam_lakes.R.
+# No delineation, conditioning, or hydroweight step is re-run to build it, so
+# it renders in well under a minute rather than hours. Pipeline code shown
+# alongside each stage (grey, non-executed blocks) is reference — copy it into
+# an R session if you actually need to run that step.
+#
+# autodep = TRUE lets chunk caching (execute: cache: true, above) correctly
+# invalidate a cached chunk when an *upstream* chunk it reads variables from
+# changes, even though this chunk itself didn't.
+knitr::opts_chunk$set(fig.align = "center", autodep = TRUE)
+
+# -- Shared plotting helpers --------------------------------------------------
+
+# Fixed-order, colourblind-safe base palette (Okabe & Ito, 2008). Named
+# palettes are derived from it below and used (never re-cycled to a
+# different meaning) so a given site/lake/direction keeps the same colour
+# wherever it appears in the document — including across figures where a
+# factor's sort order differs, since named lookup is used, not position.
+pal_okabe_ito <- c(
+  "#E69F00", "#56B4E9", "#009E73", "#F0E442",
+  "#0072B2", "#D55E00", "#CC79A7", "#000000"
+)
+
+pal_nbe <- setNames(pal_okabe_ito, paste0("NBE", 1:8))
+
+# Hand-picked (not positional) so none of the 4 are confusable — Okabe-Ito's
+# two blues in particular are avoided here.
+pal_lakes <- c(
+  Clearwater = "#E69F00",
+  Swan       = "#009E73",
+  Tilton     = "#D55E00",
+  Lohi       = "#CC79A7"
+)
+
+# WhiteboxTools' D8 pointer uses the ESRI encoding: 1=E, 2=SE, 4=S, 8=SW,
+# 16=W, 32=NW, 64=N, 128=NE.
+pal_dir <- setNames(pal_okabe_ito, c("E", "SE", "S", "SW", "W", "NW", "N", "NE"))
+
+theme_cw <- function(base_size = 11) {
+  theme_minimal(base_size = base_size) +
+    theme(
+      legend.position   = "bottom",
+      panel.grid.minor  = element_blank(),
+      plot.title        = element_text(face = "bold", size = rel(1.05)),
+      plot.subtitle      = element_text(colour = "grey35"),
+      strip.text         = element_text(face = "bold")
+    )
+}
+
+# A hillshade + elevation "relief" figure is used repeatedly (group AOI,
+# per-site DEM, per-lake DEM). Centralising it keeps every occurrence
+# consistent and keeps individual chunks short.
+plot_relief <- function(hillshade, dem = NULL, title = NULL, subtitle = NULL) {
+  p <- ggplot() +
+    tidyterra::geom_spatraster(data = hillshade, show.legend = FALSE) +
+    scale_fill_gradient(low = "grey5", high = "grey95", na.value = NA)
+  if (!is.null(dem)) {
+    p <- p +
+      ggnewscale::new_scale_fill() +
+      tidyterra::geom_spatraster(data = dem, alpha = 0.55) +
+      scale_fill_viridis_c(option = "viridis", name = "Elevation (m)", na.value = NA)
+  }
+  p + coord_sf(expand = FALSE) + theme_cw() +
+    labs(title = title, subtitle = subtitle, x = NULL, y = NULL)
+}
+
+is_html <- knitr::is_html_output()
 ```
 
 ::: {.callout-note}
-Caching logic, data download helpers, and directory structure components were developed with assistance from Claude (Anthropic).
+This guide was drafted with assistance from Claude (Anthropic), reading directly from this repository's code and cached outputs.
 :::
 
 ## Overview
 
-This workflow delineates catchments from pour point coordinates for multiple sites across Canada. It is designed to be **project-agnostic** — the inputs are a table of sites and a set of paths to shared data, and the outputs are self-contained per-site folders containing all hydrological raster layers and the catchment polygon.
+This workflow delineates catchments from pour-point coordinates for sites across Canada and computes morphometric and distance-weighted landscape metrics for each one. It is **project-agnostic**: a sites table and a handful of shared external datasets go in, self-contained per-site output folders come out.
 
-The workflow handles three challenges that make multi-site delineation complex:
+Two pipelines currently run on it, sharing most of their machinery but differing wherever the feature type forces a difference — what the "outflow" target is, and whether flow products are prepared per-group or once for the whole project. This guide uses a real, already-processed example of each:
 
-1. **Computational efficiency** — expensive DEM conditioning steps (breach depressions, flow accumulation) run once per hydrologically coherent group of sites, not once per site
-2. **Pour point correction** — intermediate files are preserved so misaligned pour points can be corrected in QGIS without rerunning the full pipeline
-3. **Reproducibility** — file-existence caching means re-running the workflow safely skips completed steps
+| | **Stream pipeline** | **Lake pipeline** |
+|---|---|---|
+| Feature type | River/stream pour point | Lake polygon |
+| Example used below | `NBE` group — 8 New Brunswick sites (`NBE1`–`NBE8`) | `Clearwater`, `Swan`, `Tilton`, `Lohi` |
+| Runner | `workflow/CELESTE/run_celeste.R` | `workflow/run_cam_lakes.R` |
+| CRS | EPSG:3979 (Canada Atlas Lambert) | EPSG:3161 (Ontario MNR Lambert) |
+| DEM source | MRDEM 30 m national VRT | OIH Enforced DEM (Ontario) |
+| Hydroweight `target_O` | Snapped pour **point** (no area) | Lake **polygon** (has area → `remove_region`) |
+| DEM/flow products | Per-`group_id` (HydroBasins-derived AOI) | One project-wide raster |
+| LOI(s) demonstrated | NDVI, NDVI trend, harvest/regen | CANLCC land cover |
 
-### Processing stages
+### Two-tier processing: groups and sites
+
+Expensive DEM conditioning (breach depressions, flow direction, flow accumulation) is run once per **group** — a hydrologically coherent region sharing a DEM — never once per site. A **site** is a single pour point (or lake); several sites sharing a `group_id` reuse the same conditioned DEM and flow-accumulation raster. In the stream pipeline, `NBE` is one such group: all 8 NBE sites share `cache/NBE/dem.tif`, `flow_pointer.tif`, and `flow_accum.tif`.
+
+::: {.columns}
+
+::: {.column width="47%"}
+**Stream pipeline**
 
 ```
 Sites table
-    │
-    ▼
-01. Build group manifest    ← HydroBasins defines group AOIs
-    │
-    ▼
-02. Prepare DEM             ← Crop MRDEM VRT to each group AOI
-    │
-    ▼
-03. Burn streams (optional) ← NHN flowlines burned into DEM
-    │
-    ▼
-04. Run WhiteboxTools        ← Breach → Pointer → Accumulation → Streams → Hillshade
-    │
-    ▼
-05. Delineate sites          ← Snap pour point → Watershed → Clip rasters
-    │
-    ▼
-06. Compute metrics          ← Areal, relief, terrain metrics per catchment
+   │
+   ▼
+1. Group manifest
+2. Prepare DEM
+3. Burn NHN streams (optional)
+4. WhiteboxTools conditioning
+5. Delineate sites
+6. Remove upstream (nesting)
+7. Reclip outputs
+8. Catchment metrics
+9. Hydroweight LOIs
 ```
-
-### Data sources
-
-| Dataset | CRS | Notes |
-|---|---|---|
-| MRDEM DTM | EPSG:3979 | 30 m national DEM, streamed via VRT |
-| NHN flowlines | EPSG:4617 | Per NTS sheet GDB, pre-downloaded |
-| HydroBasins | WGS84 | `na` + `ar` regions, level 6 default |
-
----
-
-## Directory structure
-
-```
-catchment-delineation/
-  R/
-    utils.R                  # shared helpers, validation, logging
-    01_group_sites.R         # group AOI construction
-    02_prepare_dem.R         # MRDEM crop
-    03_burn_streams.R        # NHN stream burn-in
-    04_run_whitebox.R        # DEM conditioning chain
-    05_delineate_sites.R     # per-site delineation
-    06_catchment_metrics.R   # morphometric metrics
-  sites_template.R           # define sites as a tibble
-  sites_template.csv         # alternative CSV input
-  delineate_catchments.R     # top-level runner
-  reset_workflow.R           # cache/output reset helpers
-  cache/                     # group-level rasters (auto-created)
-  output/                    # per-site outputs (auto-created)
-```
-
----
-
-## Setup
-
-### Packages
-
-```{r}
-#| label: packages
-install.packages(c(
-  "sf", "terra", "whitebox",
-  "dplyr", "tidyr", "purrr", "readr", "tibble",
-  "fs", "cli", "glue", "gt"
-))
-
-# Install WhiteboxTools binary
-whitebox::install_whitebox()
-```
-
-### Source all modules
-
-```{r}
-#| label: source-modules
-source("R/utils.R")
-source("R/01_group_sites.R")
-source("R/02_prepare_dem.R")
-source("R/03_burn_streams.R")
-source("R/04_run_whitebox.R")
-source("R/05_delineate_sites.R")
-source("R/06_catchment_metrics.R")
-source("reset_workflow.R")
-```
-
----
-
-## Defining sites {#sec-sites}
-
-Sites are defined as a `tribble` in `sites_template.R` or as a CSV. The tibble approach is recommended for programmatic construction.
-
-```{r}
-#| label: sites-tibble
-sites <- tribble(
-  ~site_id,  ~site_name,          ~lon,      ~lat,    ~group_id,   ~burn_streams, ~aoi_buffer_m, ~stream_threshold,
-  # ── Sudbury region ──────────────────────────────────────────────────────────
-  "L03",     "Lake 03",           -81.234,   46.123,  "sudbury",   TRUE,          NA,            NA,
-  "L04",     "Lake 04",           -81.198,   46.145,  "sudbury",   TRUE,          NA,            NA,
-  # ── Inuvik region ───────────────────────────────────────────────────────────
-  "YK01",    "Yellowknife 01",    -114.567,  62.456,  "inuvik",    FALSE,         25000,         2000
-)
-```
-
-### Column reference
-
-| Column | Required | Level | Description |
-|---|---|---|---|
-| `site_id` | ✓ | Site | Unique identifier, used as output folder name. No spaces. |
-| `site_name` | ✓ | Site | Human-readable name |
-| `lon` | ✓ | Site | Pour point longitude (WGS84, negative for Canada) |
-| `lat` | ✓ | Site | Pour point latitude (WGS84) |
-| `group_id` | ✓ | Site → Group | Sites sharing a `group_id` share a DEM and flow products |
-| `burn_streams` | ✓ | Group | Whether to burn NHN streams into DEM before conditioning |
-| `aoi_buffer_m` | | Group | Buffer around HydroBasins polygon (m). Default 1000 m |
-| `stream_threshold` | | Group | Flow accumulation cells to define streams. Default 1000 |
-
-::: {.callout-tip}
-Sites in the same `group_id` must have consistent `burn_streams`, `aoi_buffer_m`, and `stream_threshold` values. Validation will error if they differ within a group.
 :::
 
-### Validate sites
+::: {.column width="6%"}
+:::
 
-```{r}
-#| label: validate
-# From tibble
-sites <- validate_sites_tibble(sites)
+::: {.column width="47%"}
+**Lake pipeline**
 
-# Or from CSV
-# sites <- validate_sites("sites_template.csv")
-
-# Inspect group summary
-get_groups(sites)
 ```
+Lake sites table
+   │
+   ▼
+1. Match lake polygons
+2. Prepare DEM/flow
+3. Delineate lakes
+4. Remove upstream lakes
+5. Reclip outputs
+6. Catchment metrics
+7. Hydroweight LOIs
+```
+:::
+
+:::
+
+### Repository layout
+
+```
+workflow/
+├── R/
+│   ├── utils.R                   shared: logging, validation, AOI helpers
+│   ├── stream/                   stream-only modules (Stages 1-5, 9)
+│   │   ├── 01_group_sites.R
+│   │   ├── 02_prepare_dem.R
+│   │   ├── 03_burn_streams.R
+│   │   ├── 04_run_whitebox.R
+│   │   ├── 05_delineate_sites.R
+│   │   ├── 99_rerun_sites
+│   │   └── 06_hydroweight_attributes.R
+│   ├── lake/                     lake-only modules (Stages 1-3, 7)
+│   │   ├── 01_match_lake_polygons.R
+│   │   ├── 02_prepare_oih_dem.R
+│   │   ├── 03_delineate_lakes.R
+│   │   ├── 04_remove_upstream_lakes.R
+│   │   └── 05_hydroweight_attributes.R
+│   ├── 06_remove_upstream.R      shared (stream nesting)
+│   ├── 07_reclip_outputs.R       shared (stream + lake)
+│   └── 08_catchment_metrics.R    shared (stream + lake)
+├── raster_attributes.R           generic LOI-prep toolbox (project-agnostic)
+├── CELESTE/                      stream-pipeline runner + LOI prep
+│   ├── run_celeste.R
+│   ├── prepare_ndvi.R
+│   ├── prepare_ndvi_trend.R
+│   └── prepare_harvest_regen.R
+└── run_cam_lakes.R                lake-pipeline runner
+
+code/
+└── reset_workflow.R              cache/output reset helpers
+
+cache/<group_id>/  or  cache/CAM/       group-level rasters (auto-created)
+output/<site_id>/  or  output/CAM/…     per-site outputs (auto-created)
+```
+
+Anything specific to one pipeline — the runner and its LOI `prepare_*.R` scripts — lives in its own folder (`workflow/CELESTE/` for the stream pipeline; the lake pipeline doesn't need one yet, since `run_cam_lakes.R` is still self-contained). This keeps one pipeline's data-prep quirks from ever needing to be reconciled with the other's.
 
 ---
 
-## Stage 1 — Build group manifest {#sec-groups}
+# Worked example A — Stream delineation (`NBE` group)
 
-`build_group_manifest()` uses HydroBasins level 6 to construct a processing AOI for each group. Sites in the same group are unioned into a single AOI which becomes the extent for all downstream DEM and NHN operations.
+`NBE1`–`NBE8` are 8 New Brunswick pour points sharing `group_id = "NBE"`. Every figure in this section reads directly from `cache/NBE/` and `output/CELESTE/NBE*/` — files already produced by a completed run of the stream pipeline (`run_celeste.R`).
+
+## Stage 1 — Group manifest
+
+`build_group_manifest()` uses HydroBasins to build one processing AOI per `group_id`, unioning the basins containing that group's sites. All 9 stages downstream for a given group operate inside this one AOI.
 
 ```{r}
-#| label: group-manifest
-group_manifest <- build_group_manifest(
-  sites            = sites,
-  output_dir       = "output",
-  cache_dir        = "cache",
-  hydrobasins_dir  = "/path/to/HydroBasins",
-  default_buffer_m = 1000
-)
+#| label: nbe-group-map
+#| fig-cap: "NBE pour points on an OpenStreetMap basemap, zoomed to the site cluster. Inset: the full group AOI within New Brunswick."
+group_aois <- st_read("cache/group_aois.gpkg", quiet = TRUE)
+nbe_aoi <- group_aois |> dplyr::filter(group_id == "NBE")
 
-print(group_manifest)
+nbe_pour_points <- list.files("output/CELESTE", pattern = "^NBE[0-9]$", full.names = TRUE) |>
+  map(\(d) st_read(file.path(d, "pour_point.gpkg"), quiet = TRUE)) |>
+  bind_rows()
+
+# NBE1's catchment is reused as "the example catchment" by several later
+# stages, so its extent stays consistent throughout this section.
+nbe1_catchment <- st_read("output/CELESTE/NBE1/catchment.gpkg", quiet = TRUE)
+
+zoom_bbox <- st_bbox(st_buffer(nbe_pour_points, 3000))
+
+# maptiles::get_tiles() reprojects into whatever CRS its input sfc uses (here
+# EPSG:3979), so the tile raster and coord_sf() stay in the same CRS — plain
+# ggspatial::annotation_map_tile() assumes lon/lat and silently mis-locates
+# non-4326 data, confirmed while building this figure.
+basemap <- maptiles::get_tiles(st_as_sfc(zoom_bbox), provider = "OpenStreetMap", crop = TRUE, zoom = 12)
+
+p_main <- ggplot() +
+  tidyterra::geom_spatraster_rgb(data = basemap) +
+  geom_sf(data = nbe_aoi, fill = NA, colour = "grey20", linewidth = 0.6) +
+  geom_sf(data = nbe_pour_points, aes(colour = site_id), size = 2.6) +
+  coord_sf(xlim = c(zoom_bbox["xmin"], zoom_bbox["xmax"]),
+           ylim = c(zoom_bbox["ymin"], zoom_bbox["ymax"]), expand = FALSE) +
+  scale_colour_manual(values = pal_nbe, name = "Site") +
+  theme_cw() +
+  labs(title = "NBE pour points",
+       subtitle = glue::glue("buffer_m = {nbe_aoi$buffer_m}, burn_streams = {nbe_aoi$burn_streams}, n_sites = {nbe_aoi$n_sites}"))
+
+nb <- rnaturalearth::ne_states(country = "Canada", returnclass = "sf") |>
+  dplyr::filter(name == "New Brunswick") |>
+  st_transform(3979)
+
+p_inset <- ggplot() +
+  geom_sf(data = nb, fill = "grey95", colour = "grey50") +
+  geom_sf(data = nbe_aoi, fill = "#D55E00", colour = NA, alpha = 0.85) +
+  theme_void() +
+  theme(panel.background = element_rect(fill = "white", colour = "grey60"))
+
+p_main + inset_element(p_inset, left = 0.01, bottom = 0.6, right = 0.4, top = 0.99)
 ```
 
-### Verify AOIs before proceeding
-
-Always inspect the group AOIs in QGIS before running the DEM step. A group AOI that is too small will truncate the upstream area and produce an incorrect catchment.
-
 ```{r}
-#| label: write-aois
-# Writes cache/group_aois.gpkg — load in QGIS to verify extents
-write_group_aois(group_manifest, cache_dir = "cache")
+#| label: group-manifest-code
+#| eval: false
+#| code-fold: false
+group_manifest <- build_group_manifest(
+  sites            = sites,
+  output_dir       = here("output/CELESTE"),
+  cache_dir        = here("cache"),
+  hydrobasins_dir  = HYDROBASINS_DIR,
+  default_buffer_m = 1000
+)
 ```
 
 ::: {.callout-warning}
-If a catchment appears to be truncated at the AOI boundary, increase `aoi_buffer_m` for that group in the sites table, delete the group cache folder, and rerun from Stage 2.
+Always inspect group AOIs (`cache/group_aois.gpkg`) before Stage 2. A group AOI that's too small truncates upstream area and produces an incorrect catchment — the fix is to raise `aoi_buffer_m` for that group, clear its cache, and rerun from Stage 2.
 :::
 
-### HydroBasins region detection
+## Stage 2 — Prepare DEM
 
-The workflow automatically detects whether sites fall in the North America (`na`) or Arctic (`ar`) HydroBasins dataset using spatial intersection with the level 1 boundaries. Sites near the na/ar boundary (approximately 60°N) are tested against both.
+The MRDEM is a GDAL VRT streamed from cloud tiles — `prepare_dem()` crops it to each group AOI and writes `cache/<group_id>/dem.tif`, a rectangular crop (never masked to the AOI polygon — masking would introduce NoData at the boundary that WhiteboxTools reads as depressions, corrupting flow direction near the edge). `cache/NBE/dem.tif` itself is ~100M cells (the full group AOI shown in the Stage 1 inset); the figure below crops it down to the example catchment's extent for display.
 
 ```{r}
-#| label: region-detection
-# Internal function — shown here for transparency
-region <- resolve_hydrobasins_region(
-  group_pts       = sites_to_sf(sites) |> dplyr::filter(group_id == "inuvik"),
-  hydrobasins_dir = "/path/to/HydroBasins"
+#| label: nbe-dem
+#| fig-cap: "Group DEM cropped to the NBE1 catchment extent, for display — prepare_dem() itself crops to the full group AOI, not this window."
+dem_window   <- st_buffer(st_as_sfc(st_bbox(nbe1_catchment)), 1500)
+nbe_dem_win  <- rast("cache/NBE/dem.tif") |> terra::crop(vect(dem_window))
+nbe_hill_win <- terra::shade(
+  terra::terrain(nbe_dem_win, "slope", unit = "radians"),
+  terra::terrain(nbe_dem_win, "aspect", unit = "radians")
 )
-# Returns "na" or "ar"
+
+plot_relief(nbe_hill_win, nbe_dem_win, title = "Group DEM near NBE1") +
+  geom_sf(data = nbe1_catchment, fill = NA, colour = "white", linewidth = 0.7)
 ```
-
----
-
-## Stage 2 — Prepare DEM {#sec-dem}
-
-The MRDEM is distributed as a GDAL Virtual Raster (VRT) — a lightweight XML descriptor that references cloud-hosted tiles. No downloading or mosaicking is required. `prepare_dem()` crops the VRT to each group AOI and writes a local GeoTIFF to the group cache.
 
 ```{r}
-#| label: prepare-dem
-prepare_dem(
-  group_manifest = group_manifest,
-  mrdem_vrt      = "/path/to/mrdem-30-dtm.vrt",
-  target_crs     = 3979   # MRDEM native CRS — no reprojection needed
-)
+#| label: prepare-dem-code
+#| eval: false
+#| code-fold: false
+prepare_dem(group_manifest, mrdem_vrt = MRDEM_VRT_PATH, target_crs = 3979)
 ```
 
-### Verify DEM outputs
+## Stage 3 — Burn NHN streams (optional, per group)
+
+When `burn_streams = TRUE` for a group, NHN flowlines are merged (fixing two known geometry issues — dropping M-coordinates and casting to a single `MULTILINESTRING` type) and burned into the DEM before conditioning, anchoring flow paths to mapped channels. NBE has `burn_streams = TRUE`; its cached NHN layers cover the whole group AOI (59,701 flowline features), so the figure below crops to a small window around `NBE1` rather than plotting the full group.
 
 ```{r}
-#| label: verify-dem
-dem_check <- verify_dem_outputs(group_manifest)
-print(dem_check)
-# Expect: crs_epsg = "EPSG:3979", res_x = res_y = 30
+#| label: nbe-streams
+#| fig-cap: "NHN flowlines and waterbodies burned into the DEM near NBE1 (small window; the full NBE cache holds 59,701 flowline features across the group AOI)."
+window    <- st_buffer(st_as_sfc(st_bbox(nbe1_catchment)), 2000)
+window_bb <- st_bbox(window)
+
+flowlines_win   <- st_read("cache/NBE/flowlines.gpkg", quiet = TRUE, wkt_filter = st_as_text(window))
+waterbodies_win <- st_read("cache/NBE/waterbodies.gpkg", quiet = TRUE, wkt_filter = st_as_text(window))
+
+# wkt_filter keeps any feature that *intersects* the window, not just the
+# part of it inside the window — a flowline crossing the edge can extend far
+# beyond it, so coord_sf() must set the crop explicitly rather than let it
+# auto-fit to every layer's full (unclipped) extent.
+ggplot() +
+  geom_sf(data = window, fill = "grey97", colour = NA) +
+  geom_sf(data = waterbodies_win, fill = "#a6cee3", colour = NA) +
+  geom_sf(data = flowlines_win, colour = "#1f78b4", linewidth = 0.4) +
+  geom_sf(data = nbe1_catchment, fill = NA, colour = "#D55E00", linewidth = 0.6) +
+  coord_sf(xlim = c(window_bb["xmin"], window_bb["xmax"]),
+           ylim = c(window_bb["ymin"], window_bb["ymax"]), expand = FALSE) +
+  theme_cw() +
+  labs(title = "NHN network near NBE1", subtitle = "Orange = NBE1 unclipped catchment boundary")
 ```
-
-::: {.callout-important}
-**Do not mask the DEM to the AOI polygon.** Masking sets pixels outside the polygon boundary to NoData. WhiteboxTools reads these as genuine deep depressions, producing interior pit cells that break flow accumulation. The workflow crops to the rectangular bounding box only.
-:::
-
----
-
-## Stage 3 — NHN stream burning {#sec-nhn}
-
-Stream burning carves the mapped stream network into the DEM before hydrological conditioning. This anchors flow paths to known channel locations — particularly important in flat northern terrain where the DEM alone may not capture subtle valley gradients.
-
-```{r}
-#| label: burn-streams
-prepare_nhn_layers(
-  group_manifest = group_manifest,
-  nhn_dir        = "/path/to/NHN/gdb",
-  nhn_index      = "/path/to/NHN_INDEX_WORKUNIT_LIMIT_2.shp"
-)
-```
-
-### How NHN sheets are matched
-
-The NHN index shapefile maps NTS sheet codes to spatial extents. The workflow intersects each group AOI against the index, then locates the corresponding GDB folders on disk using prefix matching against the folder names (e.g. sheet code `10LC` matches folder `nhn_rhn_10lc000_gdb_en`). This handles the inconsistent naming conventions across NHN versions.
-
-### Geometry handling
-
-NHN flowlines require two geometry fixes before WhiteboxTools can process them:
-
-1. **Drop M coordinates** (`st_zm()`) — NHN features carry measure values that GEOS and WhiteboxTools cannot handle
-2. **Cast to MULTILINESTRING** — mixing `LINESTRING` and `MULTILINESTRING` across GDB work units produces an unrecognised ShapeType that causes a Rust panic in WhiteboxTools
 
 ```{r}
 #| label: nhn-geom-fix
-# Applied internally in burn_streams_into_dem()
+#| eval: false
+#| code-fold: false
+# Applied internally in burn_streams_into_dem() before WhiteboxTools sees it:
 flowlines |>
   sf::st_zm(drop = TRUE, what = "ZM") |>
   sf::st_cast("MULTILINESTRING") |>
   sf::st_write(streams_shp, delete_dsn = TRUE, quiet = TRUE)
 ```
 
-### Groups without NHN coverage
-
-If no NHN sheets are found for a group, empty `flowlines.gpkg` and `waterbodies.gpkg` are written and a warning is issued. The workflow continues with `burn_streams = FALSE` for that group — it never errors on missing NHN data.
-
----
-
-## Stage 4 — WhiteboxTools conditioning {#sec-whitebox}
-
-Four DEM conditioning steps run in sequence for each group. Each step checks for its output before running, so a failed run can be safely restarted.
-
-```{r}
-#| label: run-whitebox
-run_whitebox(
-  group_manifest           = group_manifest,
-  max_dist                 = 10,     # max breach path length (cells)
-  flat_increment           = NULL,   # WBT determines automatically
-  fill                     = TRUE,   # fill remaining pits after breaching
-  default_stream_threshold = 1000    # flow accumulation cells → stream
-)
-```
-
-### Step-by-step
-
-**Step 1: Breach depressions** (`wbt_breach_depressions_least_cost`)
-
-Removes topographic sinks by carving breach paths rather than filling. `dist = 10` (300 m at 30 m resolution) limits breach path length to avoid creating artificial long drainage channels. `fill = TRUE` fills any remaining depressions that breaching could not resolve — necessary for flat northern landscapes with thermokarst lakes and genuine closed depressions.
-
-```{r}
-#| label: breach
-whitebox::wbt_breach_depressions_least_cost(
-  dem    = "cache/group/dem_burned.tif",
-  output = "cache/group/dem_breached.tif",
-  dist   = 10,
-  fill   = TRUE
-)
-```
-
-**Step 2: D8 flow pointer** (`wbt_d8_pointer`)
-
-Computes the D8 flow direction raster — each cell stores a power-of-2 value (1, 2, 4, 8, 16, 32, 64, 128) indicating which of its 8 neighbours receives flow.
-
-**Step 3: D8 flow accumulation** (`wbt_d8_flow_accumulation`)
-
-::: {.callout-important}
-The input must be the **flow pointer raster**, not the DEM. Passing the DEM causes WhiteboxTools to re-derive flow direction internally, bypassing the stream-burned conditioning. `pntr = TRUE` is required to tell WhiteboxTools the input is a pre-computed pointer.
+::: {.callout-tip}
+Groups with no matching NHN sheets get empty `flowlines.gpkg`/`waterbodies.gpkg` and a warning, then continue with `burn_streams = FALSE` — a missing NHN download never hard-stops the workflow.
 :::
 
+## Stage 4 — WhiteboxTools conditioning
+
+Five steps run per group: breach depressions (least-cost, `dist = 10` cells, `fill = TRUE` to close remaining pits), D8 pointer, D8 flow accumulation (**must** take the pointer, not the DEM, with `pntr = TRUE` — passing the DEM silently re-derives flow direction and bypasses the stream-burned conditioning), stream extraction by threshold, and hillshade.
+
 ```{r}
-#| label: flow-accum
-whitebox::wbt_d8_flow_accumulation(
-  input    = "cache/group/flow_pointer.tif",
-  output   = "cache/group/flow_accum.tif",
-  out_type = "cells",
-  pntr     = TRUE   # ← critical
+#| label: nbe1-flow-accum
+#| fig-cap: "D8 flow pointer (left) and flow accumulation (right) over the NBE1 unclipped catchment. These are Stage 5's per-site outputs (flow_accum.tif/flow_pointer.tif, not the Stage 7 *_clipped versions) — Stage 6/7's clipped versions cover only the much smaller downstream wedge that survives upstream removal (see Stage 6), which would leave most of this extent NA."
+fa   <- rast("output/CELESTE/NBE1/flow_accum.tif")
+ptr  <- rast("output/CELESTE/NBE1/flow_pointer.tif")
+strm <- st_read("output/CELESTE/NBE1/streams.gpkg", quiet = TRUE)
+
+dir_levels <- data.frame(ID = c(1, 2, 4, 8, 16, 32, 64, 128),
+                          Direction = c("E", "SE", "S", "SW", "W", "NW", "N", "NE"))
+levels(ptr) <- dir_levels
+
+p_ptr <- ggplot() +
+  tidyterra::geom_spatraster(data = ptr) +
+  scale_fill_manual(values = pal_dir, name = "Flow to", na.translate = FALSE) +
+  geom_sf(data = nbe1_catchment, fill = NA, colour = "black", linewidth = 0.5) +
+  coord_sf(expand = FALSE) + theme_cw() +
+  labs(title = "D8 flow pointer")
+
+p_fa <- ggplot() +
+  tidyterra::geom_spatraster(data = log10(fa + 1)) +
+  scale_fill_viridis_c(option = "mako", name = "log10(cells)", na.value = NA) +
+  geom_sf(data = strm, colour = "white", linewidth = 0.3) +
+  geom_sf(data = nbe1_catchment, fill = NA, colour = "#E69F00", linewidth = 0.6) +
+  coord_sf(expand = FALSE) + theme_cw() +
+  labs(title = "Flow accumulation", subtitle = "White = extracted streams")
+
+p_ptr + p_fa
+```
+
+```{r}
+#| label: whitebox-code
+#| eval: false
+#| code-fold: false
+whitebox::wbt_breach_depressions_least_cost(dem = dem_burned, output = dem_breached, dist = 10, fill = TRUE)
+whitebox::wbt_d8_pointer(dem = dem_breached, output = flow_pointer)
+whitebox::wbt_d8_flow_accumulation(input = flow_pointer, output = flow_accum, out_type = "cells", pntr = TRUE)  # <- pntr = TRUE is critical
+whitebox::wbt_extract_streams(flow_accum = flow_accum, output = streams, threshold = stream_threshold)
+whitebox::wbt_hillshade(dem = dem_breached, output = hillshade)
+```
+
+## Stage 5 — Delineate sites
+
+Per site: write the pour point, snap it onto the nearest stream cell (`wbt_jenson_snap_pour_points()`, within `snap_dist`), delineate the watershed from the snapped point and D8 pointer, convert to polygon, then clip every group raster and the NHN flowlines to the result.
+
+```{r}
+#| label: nbe1-delineation
+#| fig-cap: "NBE1: raw vs. snapped pour point over the full catchment (left), and a close-up of the snap onto the extracted stream network (right)."
+pp_raw     <- st_read("output/CELESTE/NBE1/pour_point.gpkg", quiet = TRUE)
+pp_snapped <- st_read("output/CELESTE/NBE1/pour_point_snapped.shp", quiet = TRUE)
+dem1       <- rast("output/CELESTE/NBE1/dem.tif")
+hill1      <- rast("output/CELESTE/NBE1/hillshade.tif")
+
+p_full <- plot_relief(hill1, dem1, title = "Unclipped catchment") +
+  geom_sf(data = nbe1_catchment, fill = NA, colour = "white", linewidth = 0.7) +
+  geom_sf(data = pp_raw, aes(shape = "raw"), colour = "#D55E00", size = 2.6) +
+  geom_sf(data = pp_snapped, aes(shape = "snapped"), colour = "#0072B2", size = 2.6) +
+  scale_shape_manual(values = c(raw = 4, snapped = 16), name = NULL)
+
+# Zoomed-in detail of the snap itself, against the (group-extent) streams
+# raster it snapped onto — cropped to a small window so this stays fast.
+snap_window <- st_buffer(pp_snapped, 250)
+streams_tmp <- rast("output/CELESTE/NBE1/streams_tmp.tif") |> terra::crop(vect(snap_window))
+snap_bb     <- st_bbox(snap_window)
+
+# White-fill/black-outline marker for the snapped point — a solid blue dot
+# (matching pp_snapped's colour everywhere else) all but disappears against
+# the blue stream fill at this zoom, so contrast wins over colour-consistency
+# for this one panel.
+p_zoom <- ggplot() +
+  tidyterra::geom_spatraster(data = streams_tmp, show.legend = FALSE) +
+  scale_fill_gradient(low = "#1f78b4", high = "#1f78b4", na.value = "grey92") +
+  geom_segment(aes(x = st_coordinates(pp_raw)[, 1], y = st_coordinates(pp_raw)[, 2],
+                    xend = st_coordinates(pp_snapped)[, 1], yend = st_coordinates(pp_snapped)[, 2]),
+               colour = "grey20", linetype = "dashed", linewidth = 0.4,
+               arrow = arrow(length = unit(0.15, "cm"))) +
+  geom_sf(data = pp_raw, colour = "#D55E00", shape = 4, size = 3, stroke = 1.3) +
+  geom_sf(data = pp_snapped, shape = 21, fill = "white", colour = "black", size = 3, stroke = 1.1) +
+  coord_sf(xlim = c(snap_bb["xmin"], snap_bb["xmax"]), ylim = c(snap_bb["ymin"], snap_bb["ymax"]), expand = FALSE) +
+  theme_cw() +
+  theme(axis.text = element_blank(), axis.ticks = element_blank()) +
+  labs(title = "Snap detail", x = NULL, y = NULL,
+       subtitle = "Blue = stream cells\nOrange x = raw pour point, white/black dot = snapped")
+
+p_full + p_zoom + plot_layout(widths = c(1.3, 1))
+```
+
+`wbt_jenson_snap_pour_points()` moves the raw point onto the nearest cell of the **binary streams raster** (not the raw flow accumulation) within `snap_dist` metres — snapping against flow accumulation directly risks jumping to a distant, unrelated high-accumulation cell instead of the intended nearby channel.
+
+```{r}
+#| label: correcting-pour-point
+#| eval: false
+#| code-fold: false
+# If a catchment is obviously wrong, the pour point likely snapped to the
+# wrong stream cell. Open pour_point_snapped.shp + streams_tmp.tif in QGIS,
+# drag the point onto the correct stream cell, then re-run watershed delineation
+# only (skips re-snapping, reads the edited shapefile directly):
+source(here("workflow/R/stream/99_rerun_sites"))
+rerun_site_watershed("NBE1", sites, group_manifest, output_dir)
+```
+
+## Stage 6 — Remove upstream (nested catchments)
+
+For sites where one pour point sits downstream of another (either within the same group or a shared network), the smaller upstream catchment(s) are erased from the larger one so each site's catchment reports contributing area only, without double-counting area that already belongs to an upstream site. `NBE1` is a strong real example: 10 upstream catchments were erased, taking its area from 236.9 km² down to 17.7 km².
+
+```{r}
+#| label: nbe-upstream-removal
+#| fig-cap: "Unclipped vs. clipped area for all 8 NBE sites — the gap is area erased because it belongs to an upstream site."
+nbe_nesting <- st_read("output/CELESTE/all_catchments_clipped.gpkg", quiet = TRUE) |>
+  st_drop_geometry() |>
+  dplyr::filter(str_detect(site_id, "^NBE[0-9]$")) |>
+  select(site_id, area_km2_before, area_km2_after, n_erased) |>
+  pivot_longer(c(area_km2_before, area_km2_after), names_to = "stage", values_to = "area_km2") |>
+  mutate(stage = if_else(stage == "area_km2_before", "unclipped", "clipped"))
+
+ggplot(nbe_nesting, aes(x = fct_rev(site_id), y = area_km2, fill = stage)) +
+  geom_col(position = "identity", alpha = 0.85) +
+  coord_flip() +
+  scale_fill_manual(values = c(unclipped = "grey75", clipped = "#0072B2"), name = NULL) +
+  theme_cw() +
+  labs(title = "NBE: unclipped (grey, full bar) vs. clipped (blue) catchment area",
+       x = NULL, y = expression("Area ("*km^2*")"))
+```
+
+```{r}
+#| label: nbe-nesting-table
+#| tbl-cap: "Upstream catchments erased per NBE site."
+nbe_nesting_tbl <- st_read("output/CELESTE/all_catchments_clipped.gpkg", quiet = TRUE) |>
+  st_drop_geometry() |>
+  dplyr::filter(str_detect(site_id, "^NBE[0-9]$")) |>
+  arrange(site_id)
+
+gt(nbe_nesting_tbl) |>
+  cols_label(site_id = "Site", area_km2_before = "Unclipped (km²)",
+             area_km2_after = "Clipped (km²)", n_erased = "Catchments erased") |>
+  fmt_number(c(area_km2_before, area_km2_after), decimals = 1) |>
+  tab_header(title = "NBE upstream-removal summary")
+```
+
+```{r}
+#| label: remove-upstream-code
+#| eval: false
+#| code-fold: false
+group_manifest <- remove_upstream_catchments(group_manifest, sites, output_dir)
+# -> writes catchment_clipped.gpkg per site, plus all_catchments_clipped.gpkg
+```
+
+## Stage 7 — Reclip outputs
+
+Every raster and the flowlines are re-clipped to `catchment_clipped.gpkg`, producing the `*_clipped.tif` / `streams_clipped.gpkg` files used from here on.
+
+```{r}
+#| label: nbe1-clipped
+#| fig-cap: "NBE1 after clipping — compare against the unclipped panel in Stage 5."
+nbe1_clip     <- st_read("output/CELESTE/NBE1/catchment_clipped.gpkg", quiet = TRUE)
+dem1_clip     <- rast("output/CELESTE/NBE1/dem_clipped.tif")
+hill1_clip    <- terra::shade(terra::terrain(dem1_clip, "slope", unit = "radians"),
+                               terra::terrain(dem1_clip, "aspect", unit = "radians"))
+
+plot_relief(hill1_clip, dem1_clip, title = "NBE1 clipped catchment (17.7 km²)") +
+  geom_sf(data = nbe1_clip, fill = NA, colour = "white", linewidth = 0.9) +
+  geom_sf(data = pp_snapped, colour = "#0072B2", size = 2.8)
+```
+
+## Stage 8 — Morphometric metrics
+
+Geometry, areal (shape), and relief parameters follow Shekar & Mathew (2024), computed for both catchment versions.
+
+```{r}
+#| label: nbe-metrics-table
+#| tbl-cap: "Selected clipped-catchment metrics for the NBE group."
+celeste_metrics <- read_csv("output/CELESTE/catchment_metrics.csv", show_col_types = FALSE)
+
+nbe_metrics <- celeste_metrics |>
+  dplyr::filter(str_detect(site_id, "^NBE[0-9]$"), version == "clipped") |>
+  select(site_id, area_km2, form_factor, circularity_ratio, elongation_ratio,
+         basin_relief_m, mean_slope_deg, drainage_density_km_km2, hypsometric_integral) |>
+  arrange(site_id)
+
+gt(nbe_metrics) |>
+  cols_label(site_id = "Site", area_km2 = "Area (km²)", form_factor = "Form factor",
+             circularity_ratio = "Circularity", elongation_ratio = "Elongation",
+             basin_relief_m = "Relief (m)", mean_slope_deg = "Mean slope (°)",
+             drainage_density_km_km2 = "Drainage density (km/km²)",
+             hypsometric_integral = "Hypsometric integral") |>
+  fmt_number(c(area_km2, form_factor, circularity_ratio, elongation_ratio, mean_slope_deg,
+               drainage_density_km_km2, hypsometric_integral), decimals = 2) |>
+  fmt_number(basin_relief_m, decimals = 0) |>
+  tab_header(title = "NBE clipped-catchment morphometrics")
+```
+
+```{r}
+#| label: nbe-area-vs-relief
+#| fig-cap: "Basin relief vs. area for the NBE group (clipped catchments)."
+ggplot(nbe_metrics, aes(area_km2, basin_relief_m, colour = site_id, label = site_id)) +
+  geom_point(size = 3) +
+  ggrepel::geom_text_repel(show.legend = FALSE, size = 3.2) +
+  scale_colour_manual(values = pal_nbe, name = "Site") +
+  scale_x_log10() +
+  theme_cw() +
+  labs(title = "NBE catchments: relief vs. area", x = expression("Area, log scale ("*km^2*")"), y = "Basin relief (m)")
+```
+
+Two of the metrics above are easiest to understand as pictures rather than formulas — both illustrated below directly from NBE1's real geometry and DEM.
+
+```{r}
+#| label: nbe1-shape-diagram
+#| fig-cap: "NBE1 (clipped catchment), illustrating two areal metrics: the red diagonal is basin length Lb (diagonal of the axis-aligned bounding box, used by form_factor = A/Lb^2 and elongation_ratio); the dashed blue circle has the same area as the catchment, the reference used by circularity_ratio = A / area of that circle."
+bb <- st_bbox(nbe1_clip)
+diag_line <- st_sfc(
+  st_linestring(matrix(c(bb["xmin"], bb["ymin"], bb["xmax"], bb["ymax"]), ncol = 2, byrow = TRUE)),
+  crs = st_crs(nbe1_clip)
 )
-```
+bbox_poly <- st_as_sfc(bb)
 
-**Step 4: Extract streams** (`wbt_extract_streams`)
+# st_point_on_surface(), not st_centroid() — a centroid can land outside a
+# concave polygon (see CLAUDE.md's terra/hydroweight quirks); doesn't matter
+# for this illustration, but it's the safe habit either way.
+ctr     <- st_point_on_surface(nbe1_clip)
+area_m2 <- as.numeric(st_area(nbe1_clip))
+circle  <- st_buffer(ctr, sqrt(area_m2 / pi))
 
-Applies the `stream_threshold` to the flow accumulation raster to produce a binary streams raster used for pour point snapping. The threshold controls how sensitive the stream network is — lower values produce more streams including headwater channels; higher values retain only main channels.
+p_shape <- ggplot() +
+  geom_sf(data = nbe1_clip, fill = "grey90", colour = "grey30") +
+  geom_sf(data = bbox_poly, fill = NA, colour = "grey60", linetype = "dotted") +
+  geom_sf(data = diag_line, colour = "#D55E00", linewidth = 0.9) +
+  geom_sf(data = circle, fill = NA, colour = "#0072B2", linewidth = 0.9, linetype = "dashed") +
+  theme_cw() +
+  labs(title = "Shape metrics")
 
-**Step 5: Hillshade** (`wbt_hillshade`)
-
-Computed from the breached DEM for visual QA.
-
-### Verify outputs
-
-```{r}
-#| label: verify-whitebox
-wb_check <- verify_whitebox_outputs(group_manifest)
-print(wb_check)
-# flow_accum max should be >> 1000 for any group covering a significant basin
-```
-
----
-
-## Stage 5 — Site delineation {#sec-delineate}
-
-Each site is delineated independently using the group-level flow products. All intermediate files are retained for inspection and pour point correction.
-
-```{r}
-#| label: delineate
-results <- delineate_catchments(
-  sites          = sites,
-  group_manifest = group_manifest,
-  output_dir     = "output",
-  snap_dist      = 200,   # metres
-  min_cells      = 10     # catchments smaller than this are flagged
+# Hypsometric curve — relative area (a/A) vs. relative height (h/H), computed
+# directly from the clipped DEM's own elevation distribution. Its area under
+# the curve approximates the table's hypsometric_integral for NBE1.
+elev <- terra::values(dem1_clip, na.rm = TRUE) |> as.numeric() |> sort(decreasing = TRUE)
+hyps <- tibble(
+  rel_area   = seq_along(elev) / length(elev),
+  rel_height = (elev - min(elev)) / (max(elev) - min(elev))
 )
 
-print(results)
+p_hyps <- ggplot(hyps, aes(rel_area, rel_height)) +
+  geom_ribbon(aes(ymin = 0, ymax = rel_height), fill = "#0072B2", alpha = 0.15) +
+  geom_line(colour = "#0072B2", linewidth = 0.9) +
+  theme_cw() +
+  labs(title = "Hypsometric curve", x = "Relative area (a/A)", y = "Relative height (h/H)")
+
+p_shape + p_hyps
 ```
 
-### Per-site processing steps
+Reference: Shekar, P.R. & Mathew, A. (2024). Morphometric analysis of watersheds: a comprehensive review of data sources, quality, and geospatial techniques. *Watershed Ecology and the Environment*, 6, 13–25.
 
-For each site:
+## Stage 9 — Hydroweight distance-weighted attributes
 
-1. **Write pour point** as `.shp` in EPSG:3979
-2. **Snap to nearest stream** using `wbt_jenson_snap_pour_points()` — snaps to the nearest stream cell within `snap_dist` metres. Snapping to the binary streams raster (not the raw flow accumulation) prevents the point from jumping to a distant high-accumulation cell
-3. **Delineate watershed** using `wbt_watershed()` from the snapped pour point and D8 flow pointer
-4. **Convert to polygon** using `wbt_raster_to_vector_polygons()` — uses the same grid as the Whitebox processing chain, producing cleaner boundaries than `terra::as.polygons()`
-5. **Clip group rasters** to catchment extent and mask to catchment polygon
-6. **Clip NHN flowlines** to catchment polygon
-
-### Correcting a misaligned pour point
-
-If a delineated catchment is obviously wrong (too small, wrong watershed), the pour point likely snapped to the wrong stream cell:
-
-1. Open `output/<site_id>/pour_point_snapped.shp` and `output/<site_id>/streams_tmp.tif` in QGIS
-2. Edit `pour_point_snapped.shp` — move the point to the correct stream cell
-3. Reset and rerun the site only:
+`target_O` for the stream pipeline is the snapped **pour point** (`output/<site_id>/pour_point.gpkg`) — a point has no `remove_region`, unlike the lake case below. DEM/flow accumulation are resolved per site from that site's own group cache, since stream groups (NIP/TUR/KEN in Ontario, NBE/COC in New Brunswick, MOR in PEI) span independent HydroBasins regions. Each of seven weighting schemes distance-weights every LOI value by its position relative to the pour point:
 
 ```{r}
-#| label: reset-site
-source("reset_workflow.R")
-reset_site("L03")
-
-# Rerun delineation — will detect existing snapped point and skip to watershed step
-results <- delineate_catchments(
-  sites          = sites,
-  group_manifest = group_manifest,
-  output_dir     = "output",
-  snap_dist      = 200,
-  min_cells      = 10
+#| label: weighting-schemes-table
+#| tbl-cap: "hydroweight weighting schemes."
+schemes <- tribble(
+  ~Scheme, ~Description,
+  "lumped",  "Unweighted areal mean/proportion — every cell counted equally",
+  "iEucO",   "Inverse Euclidean distance to the outflow (O) target",
+  "iFLO",    "Inverse flow-path distance to the outflow, along the D8 network",
+  "HAiFLO",  "iFLO further weighted by hydrologically-active area (flow accumulation)",
+  "iEucS",   "Inverse Euclidean distance to the nearest stream cell",
+  "iFLS",    "Inverse flow-path distance to the nearest stream cell",
+  "HAiFLS",  "iFLS further weighted by hydrologically-active area"
 )
+gt(schemes)
 ```
 
-### Per-site output files
-
-```
-output/<site_id>/
-  pour_point.shp            original coordinates
-  pour_point_snapped.shp    snapped coordinates ← edit to correct
-  streams_tmp.tif           streams raster for snapping
-  flow_pointer_tmp.tif      flow pointer for watershed
-  watershed.tif             binary watershed raster
-  catchment.gpkg            catchment polygon (EPSG:3979)
-  pour_point.gpkg           snapped pour point (EPSG:3979)
-  dem.tif                   DEM clipped to catchment
-  dem_breached.tif          breached DEM clipped to catchment
-  flow_pointer.tif          flow pointer clipped to catchment
-  flow_accum.tif            flow accumulation clipped to catchment
-  streams.tif               stream network clipped to catchment
-  hillshade.tif             hillshade clipped to catchment
-  streams.gpkg              NHN flowlines clipped to catchment
-```
-
-### Combine all catchments
+Three LOIs are prepared for the stream pipeline (`workflow/CELESTE/prepare_*.R`): continuous NDVI (annual mosaic, 1984–2025), a per-pixel NDVI Theil-Sen slope/Mann-Kendall trend (one raster per group, ~29 min one-time), and a categorical harvest/regen layer (Ontario + New Brunswick sources, 2002–2024, one band per year plus a combined band).
 
 ```{r}
-#| label: combine-catchments
-all_catchments <- purrr::map(sites$site_id, function(sid) {
-  path <- fs::path(site_output_dir("output", sid), "catchment.gpkg")
-  if (!cache_exists(path)) return(NULL)
-  sf::st_read(path, quiet = TRUE)
-}) |>
-  purrr::compact() |>
-  dplyr::bind_rows()
+#| label: nbe-hydroweight
+#| fig-cap: "NBE: long-term NDVI trend (Theil-Sen slope, unweighted zonal mean) vs. proportion of catchment ever harvested 2002-2024 (areal/lumped), clipped catchments."
+celeste_hw <- read_csv("output/CELESTE/CELESTE_hydroweight.csv", show_col_types = FALSE)
 
-sf::st_write(
-  all_catchments,
-  "output/all_catchments.gpkg",
-  delete_dsn = TRUE,
-  quiet      = TRUE
-)
+nbe_hw <- celeste_hw |>
+  dplyr::filter(str_detect(site, "^NBE[0-9]$"), version == "clipped") |>
+  select(site, ndvi_trend_slope_mean, harvest_regen_combined_harvest_lumped_prop) |>
+  arrange(site)
+
+p1 <- ggplot(nbe_hw, aes(fct_rev(site), ndvi_trend_slope_mean, fill = site)) +
+  geom_col(show.legend = FALSE) +
+  geom_hline(yintercept = 0, linewidth = 0.3) +
+  coord_flip() +
+  scale_fill_manual(values = pal_nbe) +
+  theme_cw() +
+  labs(title = "NDVI trend (Sen's slope/yr)", x = NULL, y = "Slope")
+
+p2 <- ggplot(nbe_hw, aes(fct_rev(site), harvest_regen_combined_harvest_lumped_prop, fill = site)) +
+  geom_col(show.legend = FALSE) +
+  coord_flip() +
+  scale_y_continuous(labels = percent_format()) +
+  scale_fill_manual(values = pal_nbe) +
+  theme_cw() +
+  labs(title = "Ever harvested 2002-2024", x = NULL, y = "% of catchment")
+
+p1 + p2
 ```
 
----
-
-## Stage 6 — Morphometric metrics {#sec-metrics}
-
-Catchment morphometric parameters following Shekar & Mathew (2024) are computed from the catchment polygon and site DEM.
+The 7 schemes above aren't interchangeable — they can give visibly different answers for the same site and the same LOI, depending on where within the catchment the disturbed area actually sits relative to the outflow:
 
 ```{r}
-#| label: metrics
-source("R/06_catchment_metrics.R")
+#| label: nbe-schemes-compare
+#| fig-cap: "How the choice of weighting scheme changes the answer: proportion of catchment classed as harvested (2002-2024), per NBE site, under all 7 schemes."
+scheme_labels <- c(lumped = "lumped", ieuco = "iEucO", iflo = "iFLO", haiflo = "HAiFLO",
+                    ieucs = "iEucS", ifls = "iFLS", haifls = "HAiFLS")
 
-metrics   <- calculate_catchment_metrics(sites, output_dir = "output")
-ref_table <- build_metrics_reference_table()
+nbe_schemes <- celeste_hw |>
+  dplyr::filter(str_detect(site, "^NBE[0-9]$"), version == "clipped") |>
+  select(site, matches(glue::glue("^harvest_regen_combined_harvest_({paste(names(scheme_labels), collapse = '|')})_prop$"))) |>
+  pivot_longer(-site, names_to = "scheme", values_to = "prop") |>
+  mutate(
+    scheme = str_remove(scheme, "^harvest_regen_combined_harvest_") |> str_remove("_prop$"),
+    scheme = factor(scheme_labels[scheme], levels = scheme_labels)
+  )
 
-write_metrics_outputs(
-  metrics    = metrics,
-  ref_table  = ref_table,
-  output_dir = "output"
-)
+ggplot(nbe_schemes, aes(scheme, prop, group = site, colour = site)) +
+  geom_line(linewidth = 0.6, alpha = 0.8) +
+  geom_point(size = 1.8) +
+  scale_colour_manual(values = pal_nbe, name = "Site") +
+  scale_y_continuous(labels = percent_format()) +
+  theme_cw() +
+  theme(axis.text.x = element_text(angle = 30, hjust = 1)) +
+  labs(title = "Harvested proportion under each weighting scheme", x = NULL, y = "% of catchment")
 ```
 
-### Parameter categories
-
-**Geometry** — area, perimeter, basin length, mean width
-
-**Areal (shape)** — form factor, circularity ratio, elongation ratio, compactness coefficient, shape index, lemniscate ratio
-
-**Relief** — basin relief, relief ratio, relative relief, ruggedness number, dissection index, hypsometric integral, mean slope, mean aspect, elevation SD
-
-::: {.callout-note}
-The ruggedness number uses basin length / area as a proxy for drainage density since stream network metrics are not computed in this module. Flag these values when reporting if precise drainage density is needed.
-:::
-
-### Reference
-
-Shekar, P.R. & Mathew, A. (2024). Morphometric analysis of watersheds: A comprehensive review of data sources, quality, and geospatial techniques. *Watershed Ecology and the Environment*, 6, 13–25. <https://doi.org/10.1016/j.wsee.2023.12.001>
-
----
-
-## Resetting the workflow {#sec-reset}
-
 ```{r}
-#| label: reset
-source("reset_workflow.R")
+#| label: nbe-interactive-map
+#| cache: false
+#| fig-cap: "Interactive: NBE clipped catchments and pour points (HTML only — a static overview replaces this in the PDF)."
+nbe_catchments_clip <- st_read("output/CELESTE/all_catchments_clipped.gpkg", quiet = TRUE) |>
+  dplyr::filter(str_detect(site_id, "^NBE[0-9]$"))
 
-reset_all(cache_dir = "cache", output_dir = "output")   # full reset
-reset_cache(cache_dir = "cache")                         # group rasters only
-reset_sites(sites, output_dir = "output")                # all site outputs
-reset_group("sudbury", sites)                            # one group + its sites
-reset_site("L03")                                        # one site only
-```
-
-All reset functions ask for confirmation before deleting. Pass `confirm = FALSE` to skip the prompt (e.g. in scripted use).
-
----
-
-## Caching behaviour {#sec-caching}
-
-The workflow uses file-existence checks to avoid rerunning completed steps. Each module function checks whether its expected output file exists before running. If the file exists and is non-empty, the step is skipped with an informational message.
-
-This means:
-
-- Adding a new site to an existing group only triggers Stage 5 (delineation) — the expensive DEM conditioning from Stage 4 is reused
-- A session crash mid-run can be safely restarted — completed steps are skipped automatically
-- Changing a parameter (e.g. `stream_threshold`) requires manually deleting the affected cache files before rerunning
-
-The `cache_exists()` helper used throughout:
-
-```{r}
-#| label: cache-exists
-cache_exists <- function(path) {
-  fs::file_exists(path) && fs::file_size(path) > 0
+if (is_html) {
+  suppressPackageStartupMessages(library(tmap))
+  tmap_mode("view")
+  tm_shape(nbe_catchments_clip) +
+    tm_polygons(fill = "site_id", fill.scale = tm_scale(values = pal_nbe), fill_alpha = 0.5,
+                fill.legend = tm_legend(title = "Site")) +
+    tm_shape(nbe_pour_points) +
+    tm_dots(size = 0.6, fill = "black")
+} else {
+  ggplot() +
+    geom_sf(data = nbe_catchments_clip, aes(fill = site_id), colour = "white", alpha = 0.75) +
+    geom_sf(data = nbe_pour_points, size = 1.6) +
+    scale_fill_manual(values = pal_nbe, name = "Site") +
+    theme_cw() +
+    labs(title = "NBE clipped catchments overview")
 }
 ```
 
----
-
-## Common issues {#sec-troubleshooting}
-
-### Interior pit cells warning from WhiteboxTools
-
+```{r}
+#| label: hydroweight-code-stream
+#| eval: false
+#| code-fold: false
+hw_results <- calculate_hydroweight_attributes_stream(
+  sites          = sites,
+  group_manifest = group_manifest,
+  output_dir     = output_dir,
+  cache_dir      = cache_dir,
+  loi_layers     = list(
+    ndvi          = list(name = "ndvi", type = "continuous", path_lazy = prepare_ndvi_vrt()),
+    ndvi_trend    = list(name = "ndvi_trend", type = "continuous", path_template = "…/{group_id}_ndvi_trend.tif"),
+    harvest_regen = list(name = "harvest_regen", type = "categorical", path_lazy = "…", class_levels = harvest_regen_levels)
+  )
+)
 ```
-WARNING: Interior pit cells were found within the input DEM.
-```
-
-**Cause:** The DEM was masked to the AOI polygon before processing, introducing NoData sentinel values that WhiteboxTools reads as deep depressions.
-**Fix:** Ensure `prepare_dem()` crops to the rectangular extent only (no `terra::mask()`). This is the current behaviour — if you see this warning, check that your DEM was not masked externally before being passed to the workflow.
-
-### Flow accumulation max value is unrealistically small (< 100)
-
-**Cause:** `wbt_d8_flow_accumulation()` was passed the DEM instead of the flow pointer raster, or `pntr = TRUE` was omitted.
-**Fix:** The workflow uses `pntr = TRUE` and passes `flow_pointer.tif` — verify these are correct if you call the Whitebox functions directly.
-
-### NHN sheet not found
-
-```
-NHN subfolder not found for sheet 'XX': ...no folder matching 'nhn_rhn_XX*'
-```
-
-**Cause:** The NHN GDB for that sheet has not been downloaded to `nhn_dir`.
-**Fix:** Download the missing sheet from [GeoBase NHN](https://open.canada.ca/data/en/dataset/a4b190fe-e090-4e6d-881e-b87956c07977) and place in `nhn_dir`. The workflow degrades gracefully (empty flowlines, no burn) rather than erroring.
-
-### Catchment is too small / single watershed unit
-
-**Cause:** The pour point snapped to a tributary rather than the main channel, or `stream_threshold` is too low (too many stream cells, snap target is ambiguous).
-**Fix:** Increase `stream_threshold` for that group, or manually correct `pour_point_snapped.shp` as described in @sec-delineate.
-
-### `build_group_manifest()` errors with invalid geometry
-
-```
-Loop N is not valid: Edge M has duplicate vertex with edge N
-```
-
-**Cause:** HydroBasins shapefiles contain invalid geometries (a known data quality issue).
-**Fix:** `st_make_valid()` is applied automatically inside `build_group_aoi()`. If the error persists, it may be coming from a different geometry operation — check the traceback.
 
 ---
 
-## Session info
+# Worked example B — Lake delineation (`Clearwater`, `Swan`, `Tilton`, `Lohi`)
+
+These 4 lakes share one project-wide OIH DEM/flow-accumulation raster (`cache/CAM/`) rather than a per-group one — the lake pipeline doesn't span disjoint HydroBasins regions the way the stream pipeline's groups do, so there's no equivalent of the group manifest here.
+
+## Stage 1 — Match lake polygons
+
+`match_lake_polygons()` matches each lake site to an OHN waterbody polygon via a three-pass strategy: spatial buffer intersection, fuzzy name matching (Jaro-Winkler against `OFFICIAL_N`), then manual `OGF_ID` lookup for confirmed hard cases. The matched polygon is rasterized (buffered 30 m) to the full D8 extent as the pour-point target for `wbt_watershed()` — the map below reconstructs each lake's footprint from that rasterized pour-point target, over an OpenStreetMap basemap for geographic context.
+
+```{r}
+#| label: cam-lakes-map
+#| cache: false
+#| fig-cap: "Interactive: the 4 example lakes on an OpenStreetMap basemap (HTML only — small-multiple outlines replace this in the PDF). Basemap tiles are fetched live by the viewer's browser, not embedded at render time."
+cam_lakes <- c("Clearwater", "Swan", "Tilton", "Lohi")
+
+lake_outline <- function(lake) {
+  r <- rast(glue::glue("output/CAM/lake_delineation/{lake}/lake_pourpoint.tif")) |> terra::trim()
+  terra::as.polygons(r, dissolve = TRUE) |> st_as_sf() |> mutate(site_id = lake)
+}
+cam_lake_polys <- map(cam_lakes, lake_outline) |> bind_rows()
+
+if (is_html) {
+  suppressPackageStartupMessages(library(tmap))
+  tmap_mode("view")
+  tm_basemap("OpenStreetMap") +
+    tm_shape(cam_lake_polys) +
+    tm_polygons(fill = "site_id", fill.scale = tm_scale(values = pal_lakes),
+                fill.legend = tm_legend(title = "Lake"))
+} else {
+  # facet_wrap(scales = "free") isn't supported with coord_sf(), and these 4
+  # lakes are geographically far apart — so each gets its own small map (own
+  # extent) combined with patchwork, rather than one shared-extent facet grid.
+  lake_maps <- map(cam_lakes, \(lake) {
+    ggplot(dplyr::filter(cam_lake_polys, site_id == lake)) +
+      geom_sf(fill = pal_lakes[[lake]], colour = "grey20") +
+      theme_cw() +
+      theme(axis.text = element_blank(), legend.position = "none") +
+      labs(title = lake)
+  })
+  wrap_plots(lake_maps, nrow = 1) +
+    plot_annotation(title = "Matched lake polygons (from rasterized pour-point target)")
+}
+```
+
+```{r}
+#| label: match-lakes-code
+#| eval: false
+#| code-fold: false
+lake_polys <- match_lake_polygons(
+  sites            = sites,
+  lakes_path       = OIH_LAKES_PATH,
+  buffer_m         = 10,
+  name_dist_max    = 0.15,
+  name_search_km   = 40
+)
+```
+
+## Stage 2 — Prepare OIH DEM and flow products
+
+One project-wide DEM and D8 flow-accumulation raster are prepared for the whole of the OIH-covered Ontario domain (not per group, unlike the stream pipeline) — `cache/CAM/dem.tif`, `d8_pntr.tif`, `flow_accum.tif`.
+
+```{r}
+#| label: clearwater-relief
+#| fig-cap: "Clearwater lake catchment: relief, from its own clipped rasters. The lake is shown as an outline (not filled) so the DEM underneath it stays visible."
+cw_dem   <- rast("output/CAM/lake_delineation/Clearwater/dem.tif")
+cw_hill  <- terra::shade(terra::terrain(cw_dem, "slope", unit = "radians"),
+                          terra::terrain(cw_dem, "aspect", unit = "radians"))
+cw_catch <- st_read("output/CAM/lake_delineation/Clearwater/catchment.gpkg", quiet = TRUE)
+
+plot_relief(cw_hill, cw_dem, title = "Clearwater catchment") +
+  geom_sf(data = cw_catch, fill = NA, colour = "white", linewidth = 0.8) +
+  geom_sf(data = st_as_sf(cam_lake_polys[cam_lake_polys$site_id == "Clearwater", ]),
+          fill = NA, colour = "#0072B2", linewidth = 1)
+```
+
+## Stage 3 — Delineate lake catchments
+
+The matched (buffered) lake polygon is rasterized as the pour-point target and passed to `wbt_watershed()` — analogous to the snapped point in the stream pipeline, but an area rather than a single cell.
+
+```{r}
+#| label: cam-4lakes-catchments
+#| fig-cap: "Unclipped catchments for the 4 example lakes. Each is outlined in black so overlapping/adjacent boundaries stay legible even where fills are similar."
+cam_catchments <- st_read("output/CAM/lake_delineation/all_catchments.gpkg", quiet = TRUE) |>
+  dplyr::filter(site_id %in% cam_lakes)
+
+ggplot(cam_catchments) +
+  geom_sf(aes(fill = site_id), colour = "black", linewidth = 0.4, alpha = 0.85) +
+  geom_sf(data = cam_lake_polys, fill = "grey15", colour = NA) +
+  scale_fill_manual(values = pal_lakes, name = "Lake") +
+  theme_cw() +
+  labs(title = "Clearwater, Swan, Tilton, Lohi: unclipped catchments", subtitle = "Dark fill = lake footprint")
+```
+
+```{r}
+#| label: delineate-lakes-code
+#| eval: false
+#| code-fold: false
+results <- delineate_lake_catchments(
+  sites      = sites,
+  lake_polys = lake_polys,
+  cache_dir  = cache_dir,
+  output_dir = output_dir
+)
+```
+
+## Stage 4 — Remove upstream lakes
+
+Same nesting concept as Stage 6 for streams, applied to lake catchments. Among these 4 lakes, `Swan`'s clipped area is identical to its unclipped area (no upstream lake to erase), while `Lohi` loses most of its area to upstream removal — the interactive map below lets you toggle the unclipped and clipped layers to see exactly which lakes sit upstream of which.
+
+```{r}
+#| label: cam-4lakes-nesting
+#| fig-cap: "Unclipped vs. clipped area for the 4 example lakes (from catchment_metrics.csv)."
+cam_metrics <- read_csv("output/CAM/lake_delineation/catchment_metrics.csv", show_col_types = FALSE)
+
+cam_nesting <- cam_metrics |>
+  dplyr::filter(site_id %in% cam_lakes) |>
+  select(site_id, version, area_km2) |>
+  pivot_wider(names_from = version, values_from = area_km2)
+
+gt(cam_nesting) |>
+  cols_label(site_id = "Lake", unclipped = "Unclipped (km²)", clipped = "Clipped (km²)") |>
+  fmt_number(c(unclipped, clipped), decimals = 2) |>
+  tab_header(title = "CAM upstream-removal effect, 4 example lakes")
+```
+
+```{r}
+#| label: cam-nesting-interactive
+#| cache: false
+#| fig-cap: "Interactive: unclipped catchments (pale, full extent) vs. clipped catchments (solid, black outline) for the 4 example lakes — use the layer control to toggle each on/off and see how the smaller lakes nest inside the larger ones. HTML only."
+cam_catchments_unclip <- st_read("output/CAM/lake_delineation/all_catchments.gpkg", quiet = TRUE) |>
+  dplyr::filter(site_id %in% cam_lakes)
+cam_catchments_clip4 <- st_read("output/CAM/lake_delineation/all_catchments_clipped.gpkg", quiet = TRUE) |>
+  dplyr::filter(site_id %in% cam_lakes)
+
+if (is_html) {
+  suppressPackageStartupMessages(library(tmap))
+  tmap_mode("view")
+  tm_shape(cam_catchments_unclip) +
+    tm_polygons(fill = "site_id", fill.scale = tm_scale(values = pal_lakes), fill_alpha = 0.25,
+                fill.legend = tm_legend(show = FALSE), group = "Unclipped catchments") +
+    tm_shape(cam_catchments_clip4) +
+    tm_polygons(fill = "site_id", fill.scale = tm_scale(values = pal_lakes), fill_alpha = 0.7,
+                col = "black", lwd = 1, fill.legend = tm_legend(title = "Lake"), group = "Clipped catchments") +
+    tm_shape(cam_lake_polys) +
+    tm_polygons(fill = "grey15", fill.legend = tm_legend(show = FALSE), group = "Lakes")
+} else {
+  ggplot() +
+    geom_sf(data = cam_catchments_unclip, aes(fill = site_id), alpha = 0.25, colour = NA) +
+    geom_sf(data = cam_catchments_clip4, aes(fill = site_id), colour = "black", alpha = 0.7) +
+    geom_sf(data = cam_lake_polys, fill = "grey15", colour = NA) +
+    scale_fill_manual(values = pal_lakes, name = "Lake") +
+    theme_cw() +
+    labs(title = "Unclipped (pale) vs. clipped (solid) catchments")
+}
+```
+
+```{r}
+#| label: remove-upstream-lake-code
+#| eval: false
+#| code-fold: false
+lake_polys <- remove_upstream_lake_catchments(lake_polys, sites, cache_dir, output_dir)
+```
+
+## Stage 5 — Reclip outputs
+
+Same `07_reclip_outputs.R` module as the stream pipeline — it works from either a `group_manifest` (stream) or a `cache_dir` (lake), producing the same `*_clipped.tif` / `streams_clipped.gpkg` convention either way.
+
+## Stage 6 — Morphometric metrics
+
+The same `08_catchment_metrics.R` module also reports lake-specific morphometric parameters (fetch, shoreline development, lake area %, catchment-area:lake-area ratio) alongside the standard geometry/areal/relief set, when a lake polygon is present.
+
+```{r}
+#| label: cam-metrics-table
+#| tbl-cap: "Selected clipped-catchment metrics, 4 example lakes."
+cam_metrics_tbl <- cam_metrics |>
+  dplyr::filter(site_id %in% cam_lakes, version == "clipped") |>
+  select(site_id, area_km2, lake_area_ha, ca_la_ratio, shoreline_development,
+         mean_slope_deg, drainage_density_km_km2) |>
+  arrange(site_id)
+
+gt(cam_metrics_tbl) |>
+  cols_label(site_id = "Lake", area_km2 = "Catchment area (km²)", lake_area_ha = "Lake area (ha)",
+             ca_la_ratio = "CA:LA ratio", shoreline_development = "Shoreline dev.",
+             mean_slope_deg = "Mean slope (°)", drainage_density_km_km2 = "Drainage density") |>
+  fmt_number(everything(), decimals = 2) |>
+  tab_header(title = "CAM clipped-catchment morphometrics")
+```
+
+These 4 lakes were picked as examples because they genuinely span a wide range on most of these metrics — from `Swan`'s tiny, near-1:1 catchment to `Lohi`'s much larger, higher-ratio one. As in Stage 8 for the stream pipeline, that variation is easier to read as pictures than as table rows: a shape diagram per lake, and their hypsometric curves overlaid.
+
+```{r}
+#| label: cam-shape-diagrams
+#| fig-cap: "Shape metrics for each of the 4 example lake catchments: the coloured diagonal is basin length Lb; the dashed circle is the equal-area circle used by circularity_ratio. Each lake gets its own extent (small multiples, as in Stage 1) since they're geographically far apart."
+cam_shape_diagram <- function(lake) {
+  catch <- st_read(glue::glue("output/CAM/lake_delineation/{lake}/catchment_clipped.gpkg"), quiet = TRUE)
+
+  bb <- st_bbox(catch)
+  diag_line <- st_sfc(
+    st_linestring(matrix(c(bb["xmin"], bb["ymin"], bb["xmax"], bb["ymax"]), ncol = 2, byrow = TRUE)),
+    crs = st_crs(catch)
+  )
+  bbox_poly <- st_as_sfc(bb)
+
+  ctr     <- st_point_on_surface(catch)
+  area_m2 <- as.numeric(st_area(catch))
+  circle  <- st_buffer(ctr, sqrt(area_m2 / pi))
+
+  ggplot() +
+    geom_sf(data = catch, fill = "grey90", colour = "grey30") +
+    geom_sf(data = bbox_poly, fill = NA, colour = "grey60", linetype = "dotted") +
+    geom_sf(data = diag_line, colour = pal_lakes[[lake]], linewidth = 1) +
+    geom_sf(data = circle, fill = NA, colour = "black", linewidth = 0.7, linetype = "dashed") +
+    theme_cw() +
+    theme(axis.text = element_blank()) +
+    labs(title = lake)
+}
+
+wrap_plots(map(cam_lakes, cam_shape_diagram), nrow = 1)
+```
+
+```{r}
+#| label: cam-hypsometric
+#| fig-cap: "Hypsometric curves for the 4 example lake catchments, computed directly from each lake's dem_clipped.tif."
+cam_hypsometric <- function(lake) {
+  dem  <- rast(glue::glue("output/CAM/lake_delineation/{lake}/dem_clipped.tif"))
+  elev <- terra::values(dem, na.rm = TRUE) |> as.numeric() |> sort(decreasing = TRUE)
+  tibble(
+    site_id    = lake,
+    rel_area   = seq_along(elev) / length(elev),
+    rel_height = (elev - min(elev)) / (max(elev) - min(elev))
+  )
+}
+
+cam_hyps <- map(cam_lakes, cam_hypsometric) |> bind_rows()
+
+ggplot(cam_hyps, aes(rel_area, rel_height, colour = site_id)) +
+  geom_line(linewidth = 0.9) +
+  scale_colour_manual(values = pal_lakes, name = "Lake") +
+  theme_cw() +
+  labs(title = "Hypsometric curves", x = "Relative area (a/A)", y = "Relative height (h/H)")
+```
+
+## Stage 7 — Hydroweight distance-weighted attributes
+
+`target_O` here is the **lake polygon** itself (not a point), so `remove_region` excises the lake's own footprint from LOI summaries — a stream pour point has no area to exclude. CAM's demonstrated LOI is CANLCC 2020 land cover, reprojected once to EPSG:3161 and cached (`cache/CAM/hydroweight_loi/canlcc_reprojected.tif`).
+
+```{r}
+#| label: cam-hydroweight
+#| fig-cap: "Land cover composition of the 4 example lake catchments (lumped/areal weighting)."
+cam_hw <- read_csv("output/CAM/lake_delineation/CAM_hydroweight.csv", show_col_types = FALSE)
+
+cam_hw_long <- cam_hw |>
+  dplyr::filter(site %in% cam_lakes) |>
+  select(site, ends_with("_lumped_prop")) |>
+  pivot_longer(-site, names_to = "class", values_to = "prop") |>
+  mutate(class = str_remove(class, "^canlcc_") |> str_remove("_lumped_prop$") |> str_replace_all("_", " ") |> str_to_title())
+
+ggplot(cam_hw_long, aes(x = site, y = prop, fill = class)) +
+  geom_col(position = "stack") +
+  scale_y_continuous(labels = percent_format()) +
+  # 10 CANLCC classes — beyond the 8-colour Okabe-Ito set used elsewhere for
+  # site/lake identity, so a larger qualitative palette is used here instead.
+  scale_fill_brewer(palette = "Paired", name = "CANLCC class") +
+  theme_cw() +
+  labs(title = "CANLCC land cover composition (lumped)", x = NULL, y = "% of catchment")
+```
+
+```{r}
+#| label: cam-interactive-map
+#| cache: false
+#| fig-cap: "Interactive: the 4 example lake catchments with the rasterized CANLCC land cover layer underneath (HTML only — a static overview replaces this in the PDF)."
+cam_catchments_clip <- st_read("output/CAM/lake_delineation/all_catchments_clipped.gpkg", quiet = TRUE) |>
+  dplyr::filter(site_id %in% cam_lakes)
+
+if (is_html) {
+  suppressPackageStartupMessages(library(tmap))
+
+  # The full CANLCC raster is huge (61225 x 62182 cells); cropping first —
+  # rather than reading it whole — is what keeps this fast (same pattern
+  # raster_attributes.R uses for any path_lazy LOI source).
+  canlcc_levels_lookup <- data.frame(
+    ID    = c(1L, 2L, 5L, 6L, 8L, 10L, 11L, 12L, 13L, 14L, 15L, 16L, 17L, 18L, 19L),
+    Class = c("needleleaf_forest", "taiga_needleleaf_forest", "broadleaf_deciduous_forest",
+              "mixed_forest", "temperate_shrubland", "temperate_grassland", "shrubland_lichen_moss",
+              "grassland_lichen_moss", "barren_lichen_moss", "wetland", "cropland", "barren",
+              "urban", "water", "snow_ice")
+  )
+  canlcc_bb   <- st_bbox(st_buffer(cam_catchments_clip, 500))
+  canlcc_crop <- rast("cache/CAM/hydroweight_loi/canlcc_reprojected.tif") |>
+    terra::crop(terra::ext(canlcc_bb["xmin"], canlcc_bb["xmax"], canlcc_bb["ymin"], canlcc_bb["ymax"]))
+  levels(canlcc_crop) <- canlcc_levels_lookup
+
+  tmap_mode("view")
+  tm_shape(canlcc_crop) +
+    tm_raster(col.legend = tm_legend(title = "Land cover")) +
+    tm_shape(cam_catchments_clip) +
+    tm_polygons(fill = "site_id", fill.scale = tm_scale(values = pal_lakes), fill_alpha = 0.35,
+                col = "black", lwd = 1.5, fill.legend = tm_legend(title = "Lake"))
+} else {
+  ggplot() +
+    geom_sf(data = cam_catchments_clip, aes(fill = site_id), colour = "black", alpha = 0.75) +
+    geom_sf(data = cam_lake_polys, fill = "grey15", colour = NA) +
+    scale_fill_manual(values = pal_lakes, name = "Lake") +
+    theme_cw() +
+    labs(title = "CAM clipped catchments overview")
+}
+```
+
+```{r}
+#| label: hydroweight-code-lake
+#| eval: false
+#| code-fold: false
+hw_results <- calculate_hydroweight_attributes(
+  sites      = sites,
+  lake_polys = lake_polys,
+  cache_dir  = cache_dir,
+  output_dir = output_dir,
+  loi_layers = list(
+    canlcc = list(name = "canlcc", type = "categorical", path = CANLCC_PATH, class_levels = canlcc_levels)
+  )
+)
+```
+
+---
+
+# Cross-cutting concepts
+
+## LOI layer descriptor shapes
+
+`loi_layers[[i]]` supports exactly one of three source shapes, chosen per LOI based on how the source data is distributed:
+
+| Shape | When to use | Example |
+|---|---|---|
+| `path` | One raster already covering the full site extent | CANLCC (lake pipeline) |
+| `path_template` | One pre-clipped raster per site, `"{site_id}"` placeholder | — |
+| `path_lazy` | Shared source too large to reproject/cache whole (mosaic VRT, or one raster per `"{group_id}"`); cropped to each site's catchment *before* being reprojected or written to disk | NDVI mosaic VRT, NDVI trend, harvest/regen (stream pipeline) |
+
+## Categorical LOI quirks (found the hard way)
+
+A handful of `terra`/`hydroweight` behaviours are easy to get wrong silently when building a multi-band categorical LOI like harvest/regen. All were confirmed by direct testing while building that layer (24 bands: 23 years + combined):
+
+- `terra::levels(r) <- df` on a **multi-layer** SpatRaster only applies to layer 1 — layers 2+ silently keep default auto-generated labels. Build each band as an independent single-layer raster, set its levels, then combine via `terra::rast(list(...))`; never mutate a multi-layer factor object in place afterwards.
+- An exactly-3-band Byte GeoTIFF gets GDAL's automatic RGB interpretation on write, silently renaming bands to "red"/"green"/"blue" on every subsequent read — use `gdal = "PHOTOMETRIC=MINISBLACK"`.
+- A class covering 100% of a catchment produces an id-less, degenerate column name — detected and handled directly (its distance-weighted proportion is provably 1.0 under any scheme) rather than passed through `hydroweight_attributes()`.
+- A class with zero occurrences (but not the *only* class) is omitted from that row's output entirely, not reported as 0 — becomes a misleading `NA` after binding multiple sites unless explicitly back-filled.
+- `sf::st_read()`'s `wkt_filter` is pushed down to OGR *before* R-side geometry cleanup, so a source with curved geometries can silently drop or entirely miss features depending on the source — safer to read the full layer, clean geometry, then filter spatially in R.
+
+## Caching and incremental reruns
+
+Every stage checks `cache_exists(path)` (file exists **and** is non-empty) before writing, so a rerun after a crash or a newly-added site safely skips completed work — only the new site triggers Stage 5+ (delineation onward); the group's DEM conditioning from Stages 2–4 is reused as-is.
+
+```{r}
+#| label: cache-exists-code
+#| eval: false
+#| code-fold: false
+cache_exists <- function(path) fs::file_exists(path) && fs::file_size(path) > 0
+```
+
+To force specific parts to rerun, `code/reset_workflow.R` provides:
+
+```{r}
+#| label: reset-code
+#| eval: false
+#| code-fold: false
+reset_site("NBE1")            # one site's output/ folder only
+reset_group("NBE", sites)     # one group's cache + all its sites' outputs
+reset_sites(sites)            # every site's outputs, keep the group cache
+reset_all()                   # everything — cache and outputs
+```
+
+## Correcting a misaligned pour point / lake target
+
+| Pipeline | Symptom | Fix |
+|---|---|---|
+| Stream | Catchment too small / wrong tributary | Edit `output/<site_id>/pour_point_snapped.shp` in QGIS against `streams_tmp.tif`, then `rerun_site_watershed()` — reads the edited shapefile directly, skips re-snapping |
+| Lake | Catchment misses part of the lake, or grabs a neighbouring one | Edit that site's `lake_pourpoint.tif` in QGIS, then `rerun_watershed_lake()` — re-runs watershed from the edited raster without regenerating it from the polygon match |
+
+---
+
+# Troubleshooting
+
+**Interior pit cells warning from WhiteboxTools.** The DEM was masked to the AOI polygon before conditioning (introducing NoData that reads as depressions). `prepare_dem()` crops to the rectangular extent only by design — check nothing external re-masked the DEM before this stage.
+
+**Flow accumulation max value implausibly small.** `wbt_d8_flow_accumulation()` was passed the DEM instead of the flow pointer, or `pntr = TRUE` was omitted — verify both if calling WhiteboxTools functions directly outside the module.
+
+**NHN sheet not found for a group.** The corresponding GDB hasn't been downloaded. The workflow degrades gracefully (empty flowlines/waterbodies, `burn_streams` effectively off for that group) rather than erroring — download the sheet from GeoBase NHN and place it in `nhn_dir` if burning is actually needed there.
+
+**A stream group's LOI mosaic reads as 0 everywhere instead of NA.** `build_mosaic_vrt()` always sets `-vrtnodata` for exactly this reason — without it, any area not covered by *any* input tile reads as `0`, indistinguishable from real data. This was confirmed directly: before the fix, the NBE group (no NDVI tile coverage at the time) silently produced "NDVI = 0" for every NBE catchment instead of failing the "all-NA after crop/mask" check that would have excluded it correctly.
+
+**GEOS/invalid-geometry errors from HydroBasins or waterbody sources.** `st_make_valid()` is applied inside `build_group_aoi()` (stream) and before rasterization in `rasterize_competing_classes()`. If the error persists it's likely a different geometry op — check the traceback for exactly which call raised it.
+
+---
 
 ```{r}
 #| label: session-info
-#| code-fold: false
+#| code-fold: true
 sessionInfo()
 ```
