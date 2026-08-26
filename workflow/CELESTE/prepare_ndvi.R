@@ -130,18 +130,23 @@ clean_ndvi_tiles <- function(ndvi_dir = here::here("data/ndvi"), cache_dir) {
 
   raw_files <- list.files(ndvi_dir, pattern = "[.]tif$", full.names = TRUE)
 
-  vapply(raw_files, function(f) {
-    out_path <- fs::path(out_dir, basename(f))
-    if (!cache_exists(out_path)) {
-      r <- terra::rast(f)
-      band_names <- names(r)
-      r <- terra::subst(r, from = 0, to = NA) # EE masked-pixel export fill, not a real NDVI of 0
-      r <- r / 10000 # EE export encoding: int16, scaled by 10000
-      names(r) <- band_names # subst()/arithmetic can rename layers; restore the originals
-      terra::writeRaster(r, out_path, overwrite = TRUE, datatype = "FLT4S")
-    }
-    out_path
-  }, character(1), USE.NAMES = FALSE)
+  vapply(
+    raw_files,
+    function(f) {
+      out_path <- fs::path(out_dir, basename(f))
+      if (!cache_exists(out_path)) {
+        r <- terra::rast(f)
+        band_names <- names(r)
+        r <- terra::subst(r, from = 0, to = NA) # EE masked-pixel export fill, not a real NDVI of 0
+        r <- r / 10000 # EE export encoding: int16, scaled by 10000
+        names(r) <- band_names # subst()/arithmetic can rename layers; restore the originals
+        terra::writeRaster(r, out_path, overwrite = TRUE, datatype = "FLT4S")
+      }
+      out_path
+    },
+    character(1),
+    USE.NAMES = FALSE
+  )
 }
 
 #' Materialize one multi-band NDVI GeoTIFF per group, from ONLY that
@@ -185,7 +190,9 @@ prepare_ndvi_per_group_rasters <- function(
   for (grp in unique(group_manifest$group_id)) {
     group_raster_path <- fs::path(out_dir, paste0(grp, ".tif"))
     written <- c(written, group_raster_path)
-    if (cache_exists(group_raster_path)) next
+    if (cache_exists(group_raster_path)) {
+      next
+    }
 
     matched <- match_group_tiles(files, grp)
     if (length(matched) == 0) {
@@ -218,7 +225,12 @@ prepare_ndvi_per_group_rasters <- function(
       "{terra::ncell(mini_vrt)} cells)..."
     ))
 
-    terra::writeRaster(mini_vrt, group_raster_path, overwrite = TRUE, datatype = "FLT4S")
+    terra::writeRaster(
+      mini_vrt,
+      group_raster_path,
+      overwrite = TRUE,
+      datatype = "FLT4S"
+    )
   }
 
   invisible(written)
