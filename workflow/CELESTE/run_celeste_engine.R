@@ -102,6 +102,17 @@ sites <- sites_sf |>
   mutate(lon = coords[, "X"], lat = coords[, "Y"]) |>
   select(site_id, site_name, lon, lat, group_id, burn_streams, aoi_buffer_m)
 
+# CORRECTION (per user, 2026-08-26): COC-MAIN/COC-NWB should run WITHOUT
+# stream burn-in. The source file (data/celeste_milli_sites_clean.gpkg)
+# has burn_streams = TRUE for COC — matching what the PRODUCTION run also
+# used (cache/CELESTE/COC/ has a real burned DEM, 93,577 features) — so
+# this was already wrong upstream of this script too, not something this
+# engine run introduced. Overridden here, not in the source file itself
+# (that file is the user's authoritative reference data; not edited
+# without being asked to).
+sites <- sites |>
+  mutate(burn_streams = dplyr::if_else(group_id == "COC", FALSE, burn_streams))
+
 cw_inform(glue::glue(
   "CELESTE engine run: {nrow(sites)} site(s) across ",
   "{length(unique(sites$group_id))} group(s): ",
