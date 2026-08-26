@@ -4,7 +4,7 @@ var mrange    = [5,9]; // month; range 1 to 12
 var maxcloud  = 20; // max threshold for cloud cover
 var buffer    = 10; // units pixels
 var scale     = 30; // units m
-var crs       = 'EPSG:3979';
+var crs       = 'EPSG:3161';
 var roi       = aoi; // polygons from FLImports
 var roi_bbox = roi.bounds()
 ///////////////////////////////////////////////////////////////////////////////////////
@@ -191,16 +191,45 @@ print(col.limit(50), 'Full Collection')
 var years = ee.List.sequence(yrange[0],yrange[1])
 print (years)
 
+// FIX: reduce(ee.Reducer.median()) on an EMPTY ImageCollection returns an image
+// with ZERO bands (there's nothing for the reducer to infer band names from).
+// For AOIs/years where no scene survives the cloud/bounds/date filters, that
+// 0-band image then gets passed into get_indices(), which unconditionally
+// calls .select('NIR_median') etc. -- and THAT is what throws the
+// "Band pattern '...' was applied to an Image with no bands" error.
+// The fix: build a fully-masked placeholder image with the exact band names
+// the reducer would have produced, so every yearly composite -- even empty
+// ones -- has an identical, valid 8-band structure before get_indices runs.
+var medianBandNames = bandsout.map(function(b){ return b + '_median'; });
+var emptyYearTemplate = ee.Image.constant(ee.List.repeat(0, medianBandNames.length))
+    .rename(medianBandNames)
+    .selfMask(); // fully masked -> "no valid data", but band names/count are intact
+
 // Create yearly composites with proper band naming
 var collectYear = ee.ImageCollection.fromImages(
     years.map(function(y){
         var start = ee.Date.fromYMD(y, 1, 1)
         var end = start.advance(12, 'month');
-        var yearlyComposite = col.filterDate(start, end)
-            .reduce(ee.Reducer.median())
-            .set('year',y)
+        var yearCol = col.filterDate(start, end);
+        var nImages = yearCol.size(); // scenes actually contributing to this year
+
+        // Use the real median composite when scenes exist; otherwise fall back
+        // to the masked template so downstream band-dependent code never sees
+        // a bandless image.
+        var yearlyComposite = ee.Image(ee.Algorithms.If(
+            nImages.gt(0),
+            yearCol.reduce(ee.Reducer.median()),
+            emptyYearTemplate
+        ));
+
+        return yearlyComposite
+            .set('year', y)
+            // nImages lets us filter out empty years cheaply later, without
+            // needing to evaluate the whole band-dependent graph (bandNames()
+            // triggers exactly the crash we're fixing, since it forces
+            // evaluation of get_indices' selects).
+            .set('nImages', nImages)
             .set('system:time_start', start.millis());
-        return yearlyComposite;
     }))
     .map(get_indices);
 
@@ -262,15 +291,46 @@ function convertLandsatBands(image) {
   return convertLandsatBandsToInt16(image, bandsToConvert, 10000);
 }
 
-// Filter out images with missing bands
+// Filter out years with no contributing scenes (i.e., the masked template
+// years from the empty-year fallback above). We filter on the 'nImages'
+// property set earlier rather than on bandNames().length(): every composite
+// now always has 17 bands (8 spectral/QA + 9 indices), even empty ones, so a
+// band-count check can no longer distinguish real years from empty ones --
+// and worse, computing bandNames() on a genuinely broken image is what
+// crashed the original pipeline.
 var nullimages = collectYear
-    .map(function(image) {
-      return image.set('count', image.bandNames().length())
-    })
-    .filter(ee.Filter.eq('count', 17)) // Adjust count based on expected number of bands
+    .filter(ee.Filter.gt('nImages', 0))
     .map(convertLandsatBands)
     .map(function(image){return image.clip(roi_bbox)});
-print(nullimages, 'Complete images')
+print(nullimages, 'Complete images (years with at least 1 contributing scene)')
+
+// Optional diagnostic: see exactly which years had zero contributing scenes
+// for this AOI, so you know which years will be missing from the exported
+// time series (rather than silently dropped).
+var emptyYears = collectYear
+    .filter(ee.Filter.eq('nImages', 0))
+    .aggregate_array('year');
+print(emptyYears, 'Years with zero contributing scenes for this AOI')
+
+// ---------------------------------------------------------------------
+// NA-FILLED VERSION FOR EXPORT: keeps ALL years, 1984-2025, in the output
+// time series -- years with zero contributing scenes stay in as fully
+// masked (NA) bands rather than being dropped, so every exported band
+// stack has the same year-to-band-index mapping regardless of AOI.
+// -9999 is used as an explicit sentinel "no data" value: after unmask(),
+// GEE writes -9999 into the GeoTIFF wherever a pixel was masked (i.e. every
+// pixel in an empty year, or any pixel outside your AOI's cloud-free
+// coverage). Read into R (e.g. with terra::rast()), set the NAflag to
+// -9999 and those pixels come back in as proper NA, e.g.:
+//   r <- terra::rast("Landsat_NDVI_1984_2025.tif")
+//   terra::NAflag(r) <- -9999
+// ---------------------------------------------------------------------
+var allYearsImages = collectYear
+    .map(convertLandsatBands)
+    .map(function(image){
+        return image.clip(roi_bbox).unmask(-9999);
+    });
+print(allYearsImages, 'All years (missing years filled as NA = -9999)')
 
 // Test visualization
 var testImage = nullimages.filter(ee.Filter.eq('year', 2023)).first()
@@ -337,7 +397,10 @@ var variablesToExport = [
  * @param {string} variableName - Name of the variable to export
    */
    function exportVariableTimeSeries(variableName) {
-     var timeSeries = createVariableTimeSeries(variableName, nullimages);
+     // Uses allYearsImages so every export has one band per year in yrange,
+     // with missing years present as an explicit -9999 NA layer rather than
+     // silently absent -- keeps the year->band mapping identical across AOIs.
+     var timeSeries = createVariableTimeSeries(variableName, allYearsImages);
 
   Export.image.toDrive({
     image: timeSeries.clip(roi_bbox),
@@ -348,7 +411,12 @@ var variablesToExport = [
     scale: scale,
     crs: crs,
     maxPixels: 1e13,
-    fileFormat: 'GeoTIFF'
+    fileFormat: 'GeoTIFF',
+    // Embeds an actual NoData tag (-9999) in the GeoTIFF header -- matches
+    // the value used in allYearsImages' unmask(-9999) above. Without this,
+    // the exported -9999s are just ordinary pixel values with no metadata
+    // flag, and R/QGIS/etc. have no way to know they mean "missing".
+    formatOptions: {noData: -9999}
   });
 
   print('Export task created for variable: ' + variableName);
@@ -381,8 +449,12 @@ var variablesToExport = [
   print('Export tasks created for key variables: ' + keyVariables.join(', '));
 }
 
-// Example: Create and visualize NDVI time series
-var ndviTimeSeries = createVariableTimeSeries('NDVI', nullimages);
+// NOTE: switched from `nullimages` to `allYearsImages` so the exported time
+// series always has one band per calendar year in [yrange], with missing
+// years present as an explicit NA (-9999) layer instead of being skipped.
+// If you'd rather go back to silently dropping empty years, swap this back
+// to `nullimages`.
+var ndviTimeSeries = createVariableTimeSeries('NDVI', allYearsImages);
 print(ndviTimeSeries, 'NDVI Time Series');
 
 // Visualize NDVI for a specific year from the time series
@@ -397,10 +469,10 @@ Map.addLayer(ndvi2020FromSeries.clip(roi_bbox), ndviParams, 'NDVI 2020 from Time
 // exportAllVariableTimeSeries();
 
 // Option 2: Export only specific key variables
-exportSpecificVariables();
+//exportSpecificVariables();
 
 // Option 3: Export individual variables (uncomment as needed)
-exportVariableTimeSeries('LSWI');
+exportVariableTimeSeries('NDVI');
 // exportVariableTimeSeries('EVI');
 // exportVariableTimeSeries('NDMI');
 // exportVariableTimeSeries('B_median');
@@ -416,7 +488,7 @@ print('Check the Tasks tab to run the export tasks.');
  * Function to export variable time series to Earth Engine Assets
    */
    function exportVariableToAsset(variableName) {
-     var timeSeries = createVariableTimeSeries(variableName, nullimages);
+     var timeSeries = createVariableTimeSeries(variableName, allYearsImages);
 
   Export.image.toAsset({
     image: timeSeries.clip(roi_bbox),
