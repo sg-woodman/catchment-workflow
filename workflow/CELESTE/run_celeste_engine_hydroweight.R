@@ -33,12 +33,24 @@
 #     zero real coverage from either harvest/regen source, confirmed
 #     against actual gdb features, not a caching artifact).
 #
-# STAGE ORDER: remove_upstream_catchments() must run first — hydroweighting
-# needs catchment_clipped.gpkg to exist for the "clipped" version, which
-# run_celeste_engine.R never produced (it stops after Stage 3, delineation).
-# reclip_outputs()/calculate_catchment_metrics() (production's Stages 7-8)
-# are NOT run here — hydroweighting reads catchment polygons + group-level
-# rasters directly, it doesn't need per-site re-clipped rasters.
+# STAGE ORDER: remove_upstream_catchments() AND reclip_outputs() must both
+# run first. remove_upstream_catchments() produces catchment_clipped.gpkg,
+# needed for the "clipped" hydroweight version at all. reclip_outputs() is
+# ALSO required, not optional — confirmed the hard way (2026-08-26): the
+# "clipped" version's stream-based weighting schemes (iEucS/iFLS/HAiFLS)
+# silently come out missing (not erroring — process_hw_site_stream()'s
+# target_S resolution falls back to dropping stream-based schemes when
+# streams_clipped.tif isn't found, per resolve_hw_streams_path_stream())
+# unless reclip_outputs() has already run to produce that file. An earlier
+# version of this script skipped reclip_outputs() on the reasoning that
+# "hydroweighting reads catchment polygons + group-level rasters directly,
+# it doesn't need per-site re-clipped rasters" — true for the DEM/flow_
+# accum rasters, but NOT true for the streams raster specifically, which
+# has separate clipped/unclipped file variants
+# (resolve_hw_streams_path_stream() looks for streams_clipped.tif when
+# version == "clipped", streams.tif otherwise) — only reclip_outputs()
+# produces the former. calculate_catchment_metrics() (production's Stage
+# 8) is still not run here — hydroweighting doesn't need it.
 #
 # Usage: source after run_celeste_engine.R (and its COC-burn-in fix) have
 # already been run — this script assumes output/CELESTE_engine already has
@@ -54,6 +66,7 @@ source(here("workflow/R/stream/03_burn_streams.R"))
 source(here("workflow/R/stream/05_delineate_sites.R"))
 source(here("workflow/R/stream/06_hydroweight_attributes.R")) # calculate_hydroweight_attributes_stream()
 source(here("workflow/R/06_remove_upstream.R"))
+source(here("workflow/R/07_reclip_outputs.R")) # reclip_outputs() — see STAGE ORDER note above for why this is required, not optional
 source(here("workflow/R/engine/00_resolve_config.R"))
 source(here("workflow/R/engine/01_build_group_manifest.R"))
 source(here("workflow/R/engine/02_prepare_terrain.R"))
@@ -108,6 +121,14 @@ group_manifest <- gm$group_manifest
 
 upstream_results <- remove_upstream_catchments(sites, output_dir)
 print(upstream_results)
+
+# =============================================================================
+# Prerequisite: reclip_outputs (produces streams_clipped.tif + other
+# *_clipped.tif per site — see STAGE ORDER note above)
+# =============================================================================
+
+reclip_results <- reclip_outputs(sites = sites, output_dir = output_dir, group_manifest = group_manifest)
+print(table(reclip_results$status))
 
 # =============================================================================
 # LOI prep
