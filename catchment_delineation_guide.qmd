@@ -212,30 +212,32 @@ workflow/
 │   ├── utils.R                   shared: logging, validation, AOI helpers
 │   ├── stream/                   reusable stream/river building blocks —
 │   │   │                         used directly by engine/, not a pipeline
-│   │   │                         of their own (old 02_prepare_dem.R /
-│   │   │                         04_run_whitebox.R retired; see git history)
-│   │   ├── 01_group_sites.R
-│   │   ├── 03_burn_streams.R
-│   │   ├── 05_delineate_sites.R
+│   │   │                         of their own (old numbered-stage files
+│   │   │                         retired; see git history). No numeric
+│   │   │                         prefixes — order is set by the caller.
+│   │   ├── group_sites.R
+│   │   ├── burn_streams.R
+│   │   ├── delineate_sites.R
 │   │   ├── 99_rerun_sites        pre-engine only; kept for an unrelated script
-│   │   └── 06_hydroweight_attributes.R
-│   ├── lake/                     lake-only modules (Stages 1-3, 7)
-│   │   ├── 01_match_lake_polygons.R
-│   │   ├── 02_prepare_oih_dem.R
-│   │   ├── 03_delineate_lakes.R
-│   │   ├── 04_remove_upstream_lakes.R
-│   │   └── 05_hydroweight_attributes.R
+│   │   └── hydroweight_attributes.R
+│   ├── lake/                     reusable lake building blocks, same role
+│   │   │                         as stream/ (old 02_prepare_oih_dem.R /
+│   │   │                         03_delineate_lakes.R retired; terrain
+│   │   │                         prep + delineation now go through engine/)
+│   │   ├── match_lake_polygons.R
+│   │   ├── remove_upstream_lakes.R
+│   │   └── hydroweight_attributes.R
 │   ├── engine/                   modular, input-driven delineation engine —
-│   │   │                         standard approach for stream/river projects
+│   │   │                         standard approach for every project now
 │   │   ├── 00_resolve_config.R
 │   │   ├── 01_build_group_manifest.R
 │   │   ├── 02_prepare_terrain.R
 │   │   ├── 03_prepare_streams_burn.R
 │   │   ├── 04_delineate_site.R
 │   │   └── 99_rerun_sites
-│   ├── 06_remove_upstream.R      shared (stream nesting)
-│   ├── 07_reclip_outputs.R       shared (stream + lake)
-│   └── 08_catchment_metrics.R    shared (stream + lake)
+│   ├── remove_upstream.R         shared (stream nesting)
+│   ├── reclip_outputs.R          shared (stream + lake)
+│   └── catchment_metrics.R       shared (stream + lake)
 ├── raster_attributes.R           generic LOI-prep toolbox (project-agnostic)
 ├── CELESTE/                      CELESTE runner (engine-based) + LOI prep
 │   ├── run_celeste.R
@@ -243,7 +245,16 @@ workflow/
 │   ├── prepare_ndvi_trend.R
 │   ├── prepare_harvest_regen.R
 │   └── tidy_outputs.R            long-format plotting-ready tables
-└── run_cam_lakes.R                lake-pipeline runner
+├── CAM/                          CAM streams runner (engine-based) + LOI prep
+│   ├── run_cam_streams.R
+│   ├── prepare_ndvi.R
+│   ├── prepare_ndvi_trend.R
+│   ├── prepare_harvest_regen.R
+│   ├── upload_catchments_to_gee.R
+│   └── tidy_outputs.R
+├── templates/
+│   └── run_engine_template.R     blank TODO-annotated skeleton for a new project
+└── run_cam_lakes.R                CAM lakes runner (engine-based)
 
 code/
 └── reset_workflow.R              cache/output reset helpers
@@ -937,11 +948,11 @@ lake_polys <- remove_upstream_lake_catchments(lake_polys, sites, cache_dir, outp
 
 ## Stage 5 — Reclip outputs
 
-Same `07_reclip_outputs.R` module as the stream pipeline — it works from either a `group_manifest` (stream) or a `cache_dir` (lake), producing the same `*_clipped.tif` / `streams_clipped.gpkg` convention either way.
+Same `reclip_outputs.R` module as the stream pipeline — it works from either a `group_manifest` (stream) or a `cache_dir` (lake), producing the same `*_clipped.tif` / `streams_clipped.gpkg` convention either way.
 
 ## Stage 6 — Morphometric metrics
 
-The same `08_catchment_metrics.R` module also reports lake-specific morphometric parameters (fetch, shoreline development, lake area %, catchment-area:lake-area ratio) alongside the standard geometry/areal/relief set, when a lake polygon is present.
+The same `catchment_metrics.R` module also reports lake-specific morphometric parameters (fetch, shoreline development, lake area %, catchment-area:lake-area ratio) alongside the standard geometry/areal/relief set, when a lake polygon is present.
 
 ```{r}
 #| label: cam-metrics-table
