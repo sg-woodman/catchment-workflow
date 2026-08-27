@@ -98,12 +98,12 @@ library(here)
 
 # -- Source modules --------------------------------------------------------
 source(here("workflow/R/utils.R"))
-source(here("workflow/R/stream/03_burn_streams.R")) # burn_streams_into_dem() — reused by engine 03 (not exercised: streams_burn source = "none" here)
-source(here("workflow/R/stream/05_delineate_sites.R")) # load_group_rasters(), snap_pour_point(), delineate_watershed(), clip_rasters_to_catchment(), clip_flowlines_to_catchment() — reused unmodified by engine 04
-source(here("workflow/R/stream/06_hydroweight_attributes.R")) # calculate_hydroweight_attributes_stream() — reused unmodified, raster_crs overridden below
-source(here("workflow/R/06_remove_upstream.R"))
-source(here("workflow/R/07_reclip_outputs.R"))
-source(here("workflow/R/08_catchment_metrics.R"))
+source(here("workflow/R/stream/burn_streams.R")) # burn_streams_into_dem() — reused by engine 03 (not exercised: streams_burn source = "none" here)
+source(here("workflow/R/stream/delineate_sites.R")) # load_group_rasters(), snap_pour_point(), delineate_watershed(), clip_rasters_to_catchment(), clip_flowlines_to_catchment() — reused unmodified by engine 04
+source(here("workflow/R/stream/hydroweight_attributes.R")) # calculate_hydroweight_attributes_stream() — reused unmodified, raster_crs overridden below
+source(here("workflow/R/remove_upstream.R"))
+source(here("workflow/R/reclip_outputs.R"))
+source(here("workflow/R/catchment_metrics.R"))
 source(here("workflow/R/engine/00_resolve_config.R"))
 source(here("workflow/R/engine/01_build_group_manifest.R"))
 source(here("workflow/R/engine/02_prepare_terrain.R"))
@@ -119,7 +119,7 @@ source(here("workflow/CAM/prepare_harvest_regen.R")) # prepare_cam_harvest_regen
 # If a future CAM-streams-like project needs HydroBasins-based grouping
 # (grouping$strategy = "hydrobasins" — a large national-mosaic DEM worth
 # cropping per region, unlike OIH's single project-wide raster set), also
-# source: workflow/R/stream/01_group_sites.R
+# source: workflow/R/stream/group_sites.R
 
 # =============================================================================
 # CONFIGURATION — verify paths before running

@@ -13,7 +13,7 @@
 #     p-value across a raster time-series stack (e.g. annual NDVI composites)
 #   build_mosaic_vrt()       — mosaic scattered raster tiles (e.g. per-region
 #     NDVI exports) into one lightweight VRT, safe to pass as a hydroweight
-#     loi_layers `path_lazy` (see workflow/R/stream/06_hydroweight_attributes.R)
+#     loi_layers `path_lazy` (see workflow/R/stream/hydroweight_attributes.R)
 #   rasterize_competing_classes() — rasterize several "class bucket" vector
 #     layers (e.g. harvest vs. regen disturbance polygons) into one
 #     categorical raster with temporal precedence between classes, one band

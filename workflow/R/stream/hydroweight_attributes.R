@@ -225,7 +225,7 @@ validate_loi_layers_stream <- function(loi_layers) {
 
 #' Prepare project-wide LOI rasters (path-based layers only)
 #'
-#' Mirrors workflow/R/lake/05_hydroweight_attributes.R's prepare_loi_layers().
+#' Mirrors workflow/R/lake/hydroweight_attributes.R's prepare_loi_layers().
 #' Layers declared with path_template or path_lazy (both resolved per site)
 #' are left NULL here — see resolve_site_loi_raster().
 #'

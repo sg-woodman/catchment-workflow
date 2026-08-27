@@ -70,12 +70,12 @@ library(here)
 
 # -- Source modules --------------------------------------------------------
 source(here("workflow/R/utils.R"))
-source(here("workflow/R/stream/03_burn_streams.R")) # burn_streams_into_dem() — needed if streams_burn$source != "none"
-source(here("workflow/R/stream/05_delineate_sites.R")) # reused building blocks for point-mode delineation
-source(here("workflow/R/stream/06_hydroweight_attributes.R")) # calculate_hydroweight_attributes_stream() — used in Stage 7
-source(here("workflow/R/06_remove_upstream.R"))
-source(here("workflow/R/07_reclip_outputs.R"))
-source(here("workflow/R/08_catchment_metrics.R"))
+source(here("workflow/R/stream/burn_streams.R")) # burn_streams_into_dem() — needed if streams_burn$source != "none"
+source(here("workflow/R/stream/delineate_sites.R")) # reused building blocks for point-mode delineation
+source(here("workflow/R/stream/hydroweight_attributes.R")) # calculate_hydroweight_attributes_stream() — used in Stage 7
+source(here("workflow/R/remove_upstream.R"))
+source(here("workflow/R/reclip_outputs.R"))
+source(here("workflow/R/catchment_metrics.R"))
 source(here("workflow/R/engine/00_resolve_config.R"))
 source(here("workflow/R/engine/01_build_group_manifest.R"))
 source(here("workflow/R/engine/02_prepare_terrain.R"))
@@ -84,7 +84,7 @@ source(here("workflow/R/engine/04_delineate_site.R"))
 source(here("code/reset_workflow.R")) # reset_site() — used by rerun_engine_sites()'s resnap path
 source(here("workflow/R/engine/99_rerun_sites")) # rerun_engine_site_watershed(), rerun_engine_sites() — see "RERUNNING AFTER A CORRECTION" above
 # TODO: if grouping$strategy = "hydrobasins" below, also source:
-# source(here("workflow/R/stream/01_group_sites.R"))
+# source(here("workflow/R/stream/group_sites.R"))
 
 # =============================================================================
 # CONFIGURATION — fill in every TODO before running
@@ -154,7 +154,7 @@ nhn_raw_dir    <- NULL # TODO if source = "nhn_auto" — shared dir for download
 
 # -- Pour point geometry: leave lake_polygons = NULL for point pour points
 # (Jenson snap). Supply a SpatVector/sf with a `matched_lake` column (see
-# workflow/R/lake/01_match_lake_polygons.R's output shape) and give sites
+# workflow/R/lake/match_lake_polygons.R's output shape) and give sites
 # a `lake_name` column to switch to lake-polygon pour points instead.
 lake_polygons <- NULL # TODO
 lake_buffer_m <- 30
@@ -164,7 +164,7 @@ lake_buffer_m <- 30
 # raster (e.g. OIH). Use "hydrobasins" only if your terrain source is a
 # large national mosaic/VRT worth cropping per region (e.g. MRDEM) — in
 # that case your sites table must already carry a group_id column, and you
-# need workflow/R/stream/01_group_sites.R sourced (see above).
+# need workflow/R/stream/group_sites.R sourced (see above).
 grouping <- list(strategy = "whole_domain") # TODO if needed: "hydrobasins", hydrobasins_dir = ..., hybas_level = 6, default_buffer_m = 1000
 
 # =============================================================================

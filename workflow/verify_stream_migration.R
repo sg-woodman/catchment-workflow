@@ -66,10 +66,10 @@ library(glue)
 library(here)
 
 source(here("workflow/R/utils.R"))
-source(here("workflow/R/stream/01_group_sites.R"))
-source(here("workflow/R/stream/05_delineate_sites.R"))
+source(here("workflow/R/stream/group_sites.R"))
+source(here("workflow/R/stream/delineate_sites.R"))
 source(here("workflow/R/stream/99_rerun_sites"))
-source(here("workflow/R/06_remove_upstream.R"))
+source(here("workflow/R/remove_upstream.R"))
 
 # -- Config: must match the run that produced the reference output ----------
 cache_dir <- here("cache/CELESTE")
@@ -339,7 +339,7 @@ clipped_ok <- compare_catchments(
 cli::cli_h1("Result")
 if (unclipped_ok && clipped_ok) {
   cli::cli_alert_success(
-    "PASS — workflow/R/stream/* + workflow/R/06_remove_upstream.R reproduce the reference CELESTE catchments (including replayed manual corrections)."
+    "PASS — workflow/R/stream/* + workflow/R/remove_upstream.R reproduce the reference CELESTE catchments (including replayed manual corrections)."
   )
 } else {
   cli::cli_alert_danger(

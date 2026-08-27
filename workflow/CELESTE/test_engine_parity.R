@@ -107,7 +107,7 @@
 # sensitive to sub-pixel vector perturbation in flat terrain. If CELESTE
 # is ever migrated onto the engine for real (not just this test), supply
 # streams_burn via the RAW multi-sheet NHN merge (same source path
-# workflow/R/stream/03_burn_streams.R's own read_merge_nhn_layer() uses),
+# workflow/R/stream/burn_streams.R's own read_merge_nhn_layer() uses),
 # not a pre-clipped vector, to avoid this double-clip — or extend
 # 03_prepare_streams_burn.R's "supplied" branch to skip the intersection
 # when the input is already known to be pre-clipped to the target AOI.
@@ -127,9 +127,9 @@ library(glue)
 library(here)
 
 source(here("workflow/R/utils.R"))
-source(here("workflow/R/stream/01_group_sites.R")) # build_group_manifest() — reused unmodified by the engine's "hydrobasins" strategy
-source(here("workflow/R/stream/03_burn_streams.R")) # burn_streams_into_dem() — reused unmodified by resolve_streams_burn()'s "supplied" branch
-source(here("workflow/R/stream/05_delineate_sites.R")) # snap_pour_point(), delineate_watershed(), etc. — reused unmodified by engine/04
+source(here("workflow/R/stream/group_sites.R")) # build_group_manifest() — reused unmodified by the engine's "hydrobasins" strategy
+source(here("workflow/R/stream/burn_streams.R")) # burn_streams_into_dem() — reused unmodified by resolve_streams_burn()'s "supplied" branch
+source(here("workflow/R/stream/delineate_sites.R")) # snap_pour_point(), delineate_watershed(), etc. — reused unmodified by engine/04
 source(here("workflow/R/engine/00_resolve_config.R"))
 source(here("workflow/R/engine/01_build_group_manifest.R"))
 source(here("workflow/R/engine/02_prepare_terrain.R"))

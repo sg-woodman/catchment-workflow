@@ -18,7 +18,7 @@
 #     02_prepare_terrain.R only calls resolve_streams_burn() when
 #     source != "none").
 #
-# Requires workflow/R/stream/03_burn_streams.R already sourced for
+# Requires workflow/R/stream/burn_streams.R already sourced for
 # burn_streams_into_dem() (reused unmodified — it only needs flowlines +
 # a dem path + an output path, no CRS assumptions beyond "same CRS as the
 # dem", which is guaranteed here since both are resolved against
@@ -42,7 +42,7 @@
 resolve_streams_burn <- function(config, aoi, dem_path, dem_burned_path, group_id) {
   if (!exists("burn_streams_into_dem", mode = "function")) {
     cw_abort(paste(
-      "resolve_streams_burn() requires workflow/R/stream/03_burn_streams.R",
+      "resolve_streams_burn() requires workflow/R/stream/burn_streams.R",
       "to be sourced first (defines burn_streams_into_dem())."
     ))
   }

@@ -14,7 +14,7 @@
 #     cache_dir = config$cache_dir itself (no per-group subfolder — matches
 #     the lake pipeline's existing flat cache_dir convention).
 #   "hydrobasins" — delegates directly to the existing, unmodified
-#     workflow/R/stream/01_group_sites.R::build_group_manifest() /
+#     workflow/R/stream/group_sites.R::build_group_manifest() /
 #     workflow/R/utils.R::build_group_aoi() (HydroBasins level-6 union per
 #     user-assigned group_id). Requires sites already carry a group_id
 #     column and requires workflow/R/utils.R + workflow/R/stream/
@@ -76,12 +76,12 @@ build_engine_group_manifest <- function(config) {
   }
 
   # -- "hydrobasins" strategy — delegate to the existing, unmodified
-  # CELESTE machinery. Requires workflow/R/stream/01_group_sites.R already
+  # CELESTE machinery. Requires workflow/R/stream/group_sites.R already
   # sourced (defines build_group_manifest()).
   if (!exists("build_group_manifest", mode = "function")) {
     cw_abort(paste(
       "grouping$strategy = 'hydrobasins' requires",
-      "workflow/R/stream/01_group_sites.R to be sourced first",
+      "workflow/R/stream/group_sites.R to be sourced first",
       "(defines build_group_manifest())."
     ))
   }

@@ -97,13 +97,13 @@ library(glue)
 library(here)
 
 source(here("workflow/R/utils.R"))
-source(here("workflow/R/stream/01_group_sites.R")) # build_group_manifest() — reused unmodified by the engine's "hydrobasins" strategy
-source(here("workflow/R/stream/03_burn_streams.R")) # burn_streams_into_dem() — reused unmodified by resolve_streams_burn()
-source(here("workflow/R/stream/05_delineate_sites.R")) # snap_pour_point(), delineate_watershed(), etc. — reused unmodified by engine/04
-source(here("workflow/R/stream/06_hydroweight_attributes.R")) # calculate_hydroweight_attributes_stream() — shared with CAM, reused unmodified
-source(here("workflow/R/06_remove_upstream.R"))
-source(here("workflow/R/07_reclip_outputs.R")) # reclip_outputs() — required before Stage 7, see STAGE ORDER note above
-source(here("workflow/R/08_catchment_metrics.R"))
+source(here("workflow/R/stream/group_sites.R")) # build_group_manifest() — reused unmodified by the engine's "hydrobasins" strategy
+source(here("workflow/R/stream/burn_streams.R")) # burn_streams_into_dem() — reused unmodified by resolve_streams_burn()
+source(here("workflow/R/stream/delineate_sites.R")) # snap_pour_point(), delineate_watershed(), etc. — reused unmodified by engine/04
+source(here("workflow/R/stream/hydroweight_attributes.R")) # calculate_hydroweight_attributes_stream() — shared with CAM, reused unmodified
+source(here("workflow/R/remove_upstream.R"))
+source(here("workflow/R/reclip_outputs.R")) # reclip_outputs() — required before Stage 7, see STAGE ORDER note above
+source(here("workflow/R/catchment_metrics.R"))
 source(here("workflow/R/engine/00_resolve_config.R"))
 source(here("workflow/R/engine/01_build_group_manifest.R"))
 source(here("workflow/R/engine/02_prepare_terrain.R"))

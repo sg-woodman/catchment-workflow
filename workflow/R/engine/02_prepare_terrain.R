@@ -2,8 +2,8 @@
 # ---------------------------------------------------------------------------
 # Conditional terrain preparation, per group. Materializes the SAME
 # canonical set of per-group cache files every existing reused function
-# already expects (workflow/R/stream/05_delineate_sites.R's
-# load_group_rasters(), workflow/R/stream/06_hydroweight_attributes.R's
+# already expects (workflow/R/stream/delineate_sites.R's
+# load_group_rasters(), workflow/R/stream/hydroweight_attributes.R's
 # dem_breached.tif/flow_accum.tif lookup) regardless of which terrain tier
 # was supplied — so those functions can be reused completely unmodified,
 # for both grouping strategies:
@@ -143,7 +143,7 @@ prepare_engine_terrain <- function(config, group_manifest) {
     }
 
     # -- hillshade.tif: cheap, kept only so load_group_rasters() (reused
-    # unmodified from workflow/R/stream/05_delineate_sites.R) finds every
+    # unmodified from workflow/R/stream/delineate_sites.R) finds every
     # raster it expects.
     if (!cache_exists(hillshade_path) && cache_exists(breached_path)) {
       cw_inform(glue::glue("Group '{grp}': computing hillshade..."))
@@ -244,7 +244,7 @@ prepare_raw_dem_tier <- function(config, aoi, grp_cache, grp, burn) {
 
 #' Alias dem_breached.tif to the best-available dem.tif for tiers that skip
 #' real breaching (flow_pointer/flow_direction already conditioned) — kept
-#' so workflow/R/stream/06_hydroweight_attributes.R's hardcoded
+#' so workflow/R/stream/hydroweight_attributes.R's hardcoded
 #' `fs::path(grp_cache, "dem_breached.tif")` lookup always finds a file,
 #' without implying any actual depression-breaching happened.
 alias_dem_breached <- function(dem_path, breached_path, grp) {

@@ -5,7 +5,7 @@
 # snap). Both modes reuse existing, unmodified building blocks wherever
 # they're already CRS-generic:
 #
-#   Point mode reuses, verbatim, from workflow/R/stream/05_delineate_sites.R
+#   Point mode reuses, verbatim, from workflow/R/stream/delineate_sites.R
 #   (must be sourced first): load_group_rasters(), snap_pour_point(),
 #   delineate_watershed(), clip_rasters_to_catchment(),
 #   clip_flowlines_to_catchment(). Only write_pour_point_shp() and
@@ -43,7 +43,7 @@ delineate_engine_catchments <- function(
   if (!exists("load_group_rasters", mode = "function")) {
     cw_abort(paste(
       "delineate_engine_catchments() requires",
-      "workflow/R/stream/05_delineate_sites.R to be sourced first."
+      "workflow/R/stream/delineate_sites.R to be sourced first."
     ))
   }
 
