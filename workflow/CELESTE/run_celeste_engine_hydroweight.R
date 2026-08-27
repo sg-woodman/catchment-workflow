@@ -67,6 +67,7 @@ source(here("workflow/R/stream/05_delineate_sites.R"))
 source(here("workflow/R/stream/06_hydroweight_attributes.R")) # calculate_hydroweight_attributes_stream()
 source(here("workflow/R/06_remove_upstream.R"))
 source(here("workflow/R/07_reclip_outputs.R")) # reclip_outputs() — see STAGE ORDER note above for why this is required, not optional
+source(here("workflow/R/08_catchment_metrics.R")) # calculate_catchment_metrics() — standard stage in every engine project (workflow/templates/run_engine_template.R's own Stage 6), missing here only because this script started as an ad-hoc validation script, not the production sequence
 source(here("workflow/R/engine/00_resolve_config.R"))
 source(here("workflow/R/engine/01_build_group_manifest.R"))
 source(here("workflow/R/engine/02_prepare_terrain.R"))
@@ -129,6 +130,18 @@ print(upstream_results)
 
 reclip_results <- reclip_outputs(sites = sites, output_dir = output_dir, group_manifest = group_manifest)
 print(table(reclip_results$status))
+
+# =============================================================================
+# Catchment morphometric metrics — standard stage for every catchment
+# delineation workflow in this project (CAM already has this; CELESTE_engine
+# didn't, only because this script predates that being made explicit)
+# =============================================================================
+
+metrics <- calculate_catchment_metrics(sites = sites, output_dir = output_dir)
+metrics <- drop_redundant_clipped_rows(metrics, upstream_results, site_col = "site_id")
+ref_table <- build_metrics_reference_table()
+write_metrics_outputs(metrics = metrics, ref_table = ref_table, output_dir = output_dir)
+print(metrics)
 
 # =============================================================================
 # LOI prep
