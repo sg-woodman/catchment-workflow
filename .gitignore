@@ -72,6 +72,8 @@ rsconnect/
 *.html
 # Quarto project cache
 .quarto/
+# rosm package basemap tile cache (downloaded OSM tiles for map figures)
+rosm.cache/
 
 # -- Positron / VS Code -------------------------------------------------------
 .vscode/
