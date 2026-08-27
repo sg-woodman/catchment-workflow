@@ -31,12 +31,20 @@
 # just the site(s) you named, detected by checking whose erased_site_ids
 # changed.
 #
+# A third scenario, lake-polygon projects only (config$lake_polygons set):
+# a lake catchment doesn't fully contain the lake, or is otherwise wrong.
+# Edit output/<site_id>/lake_pourpoint.tif directly in QGIS, then use
+# rerun_engine_lake_site_watershed() (below) — no raw-coordinate/snap
+# distinction here, since lake mode has no snapping step at all. Ported
+# from the retired workflow/R/lake/03_delineate_lakes.R's
+# rerun_watershed_lake().
+#
 # Requires already sourced: workflow/R/utils.R, code/reset_workflow.R
-# (reset_site()), workflow/R/stream/05_delineate_sites.R (load_group_
+# (reset_site()), workflow/R/stream/delineate_sites.R (load_group_
 # rasters(), delineate_watershed(), clip_rasters_to_catchment(),
 # clip_flowlines_to_catchment()), workflow/R/engine/00-04, workflow/R/
-# 06_remove_upstream.R, 07_reclip_outputs.R, 08_catchment_metrics.R, and
-# (if loi_layers is supplied) workflow/R/stream/06_hydroweight_
+# remove_upstream.R, reclip_outputs.R, catchment_metrics.R, and
+# (if loi_layers is supplied) workflow/R/stream/hydroweight_
 # attributes.R.
 
 #' Rerun watershed delineation for a single site from an edited snapped
@@ -159,6 +167,140 @@ rerun_engine_site_watershed <- function(
       tibble::tibble(
         site_id = site_id, status = "rerun success", catchment_cells = n_cells,
         catchment_km2 = km2, flagged = flagged, flag_reason = flag_reason
+      )
+    },
+    error = function(e) {
+      cw_warn(glue::glue("Site '{site_id}': rerun failed — {e$message}"))
+      tibble::tibble(
+        site_id = site_id, status = paste("rerun failed:", e$message),
+        catchment_cells = NA_integer_, catchment_km2 = NA_real_,
+        flagged = TRUE, flag_reason = e$message
+      )
+    }
+  )
+}
+
+#' Rerun watershed delineation for a single lake site from an edited
+#' lake_pourpoint.tif
+#'
+#' Use after manually editing output/<site_id>/lake_pourpoint.tif in QGIS
+#' (paint additional cells around the lake boundary, or otherwise correct a
+#' catchment that doesn't fully contain the lake) to correct it. Re-runs
+#' watershed delineation, polygon conversion, and raster clipping — does NOT
+#' regenerate the pour point raster from the lake polygon, reads the
+#' existing (edited) lake_pourpoint.tif directly. Ported from the retired
+#' workflow/R/lake/03_delineate_lakes.R's rerun_watershed_lake() the same
+#' way engine/04_delineate_site.R's delineate_engine_lake_site() was
+#' already ported from that file's delineate_single_lake() — same buffer-
+#' free re-delineation logic, only the per-group cache resolution and
+#' canonical filenames change (flow_pointer.tif instead of d8_pntr.tif,
+#' group_manifest's cache_dir instead of a flat project cache_dir). CRS
+#' handling needed no change at all — the original already resolves it
+#' dynamically via terra::crs(d8_template), never a hardcoded EPSG.
+#'
+#' Workflow:
+#'   1. Edit output_dir/<site_id>/lake_pourpoint.tif in QGIS and save
+#'   2. Run rerun_engine_lake_site_watershed(site_id, sites, group_manifest, output_dir)
+#'   3. Re-inspect catchment.gpkg in QGIS
+#'
+#' @param site_id        Character. Site identifier
+#' @param sites          Validated sites tibble (with group_id) from
+#'   build_engine_group_manifest()
+#' @param group_manifest sf tibble from build_engine_group_manifest()
+#' @param output_dir     Character. Root output directory
+#' @param min_cells      Integer. Minimum cells threshold for flagging.
+#'   Default 10.
+#'
+#' @return Single-row tibble with delineation result for this site
+rerun_engine_lake_site_watershed <- function(
+  site_id, sites, group_manifest, output_dir, min_cells = 10
+) {
+  site_dir <- site_output_dir(output_dir, site_id)
+  pourpoint_path <- fs::path(site_dir, "lake_pourpoint.tif")
+
+  if (!fs::file_exists(pourpoint_path)) {
+    cw_abort(glue::glue(
+      "Site '{site_id}': lake_pourpoint.tif not found at {site_dir}. ",
+      "Has this site been delineated yet?"
+    ))
+  }
+
+  site <- dplyr::filter(sites, site_id == !!site_id)
+  if (nrow(site) == 0) {
+    cw_abort(glue::glue("Site '{site_id}' not found in sites tibble."))
+  }
+
+  grp <- site$group_id[1]
+  grp_manifest <- dplyr::filter(group_manifest, group_id == grp)
+  grp_cache <- grp_manifest$cache_dir[1]
+
+  cw_inform(glue::glue(
+    "Site '{site_id}': rerunning watershed delineation with edited lake pour point..."
+  ))
+
+  pointer_path <- fs::path(grp_cache, "flow_pointer.tif")
+  d8_template <- terra::rast(pointer_path)
+
+  tryCatch(
+    {
+      watershed_path <- fs::path(site_dir, "watershed.tif")
+      catchment_path <- fs::path(site_dir, "catchment.gpkg")
+
+      whitebox::wbt_watershed(
+        d8_pntr  = fs::path_abs(pointer_path),
+        pour_pts = fs::path_abs(pourpoint_path),
+        output   = fs::path_abs(watershed_path)
+      )
+
+      # Trim AFTER delineation — the untrimmed raster was needed by
+      # wbt_watershed() (pour point raster must share extent/resolution
+      # with the D8 pointer).
+      watershed_rast <- terra::rast(watershed_path) |> terra::trim()
+      terra::writeRaster(watershed_rast, watershed_path, overwrite = TRUE)
+
+      catchment_sf <- watershed_rast |>
+        terra::as.polygons() |>
+        terra::project(terra::crs(d8_template)) |>
+        sf::st_as_sf() |>
+        dplyr::mutate(site_id = site_id)
+
+      if (nrow(catchment_sf) == 0 || sf::st_is_empty(sf::st_union(catchment_sf))) {
+        cw_abort(glue::glue("Site '{site_id}': watershed polygon is empty"))
+      }
+
+      sf::st_write(catchment_sf, catchment_path, delete_dsn = TRUE, quiet = TRUE)
+
+      # Force-overwrite clipped rasters
+      catchment_vect <- terra::vect(catchment_sf)
+      rasters_to_clip <- list(
+        dem          = terra::rast(fs::path(grp_cache, "dem.tif")),
+        flow_pointer = terra::rast(pointer_path),
+        flow_accum   = terra::rast(fs::path(grp_cache, "flow_accum.tif")),
+        streams      = terra::rast(fs::path(grp_cache, "streams.tif"))
+      )
+      purrr::iwalk(rasters_to_clip, function(r, name) {
+        out_path <- fs::path(site_dir, paste0(name, ".tif"))
+        r |>
+          terra::crop(catchment_vect, snap = "out") |>
+          terra::mask(catchment_vect) |>
+          terra::writeRaster(out_path, overwrite = TRUE, gdal = c("COMPRESS=LZW", "BIGTIFF=IF_SAFER"))
+      })
+
+      n_cells  <- sum(terra::values(watershed_rast) == 1, na.rm = TRUE)
+      area_km2 <- round(sum(as.numeric(sf::st_area(catchment_sf))) / 1e6, 4)
+      flagged  <- n_cells < min_cells
+
+      cw_inform(glue::glue(
+        "Site '{site_id}': rerun complete — {n_cells} cells, {area_km2} km2"
+      ))
+
+      tibble::tibble(
+        site_id       = site_id,
+        status        = "rerun success",
+        catchment_cells = n_cells,
+        catchment_km2 = area_km2,
+        flagged       = flagged,
+        flag_reason   = if (flagged) glue::glue("{n_cells} cells") else NA_character_
       )
     },
     error = function(e) {
