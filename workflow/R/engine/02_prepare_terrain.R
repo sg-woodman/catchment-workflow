@@ -267,7 +267,10 @@ alias_dem_breached <- function(dem_path, breached_path, grp) {
 
 #' Crop a source raster to a group AOI, in the source's own native CRS
 #' (cheap — GDAL reads only the requested pixels), without reprojecting.
-#' Mirrors workflow/R/stream/02_prepare_dem.R's crop step exactly.
+#' Matched the retired workflow/R/stream/02_prepare_dem.R's crop step
+#' exactly (same terra::crop(..., snap = "out") logic) — confirmed via
+#' direct parity testing before that file was removed; see git history if
+#' you need to compare against it again.
 crop_source_to_aoi <- function(source_path, aoi, target_crs, method, group_id, label) {
   src <- terra::rast(source_path)
   aoi_vect   <- terra::vect(aoi)

@@ -24,7 +24,7 @@
 # reordering. So year = 1983 + N for CELESTE's ndvi_mosaic_N.
 #
 # Usage (from an R session, after CELESTE_engine_hydroweight.csv already
-# exists — i.e. after run_celeste_engine_hydroweight.R has been run):
+# exists — i.e. after run_celeste.R has been run):
 #   source(here("workflow/R/utils.R"))
 #   source(here("workflow/CELESTE/tidy_outputs.R"))
 #   tidy_celeste_outputs(output_dir = here("output/CELESTE_engine"))
@@ -64,8 +64,8 @@ normalize_scheme <- function(x) {
 #' `sum`/`cell_count`/`na_cell_count` are only ever computed unweighted (NA
 #' for non-"lumped" rows) — NOTE: CELESTE's own loi_layers config restricts
 #' `stats` to exclude sum/cell_count/NA_cell_count entirely (see
-#' run_celeste.R/run_celeste_engine_hydroweight.R), so those 3 won't be
-#' present in the source data at all here — included in the output schema
+#' run_celeste.R), so those 3 won't be present in the source data at all
+#' here — included in the output schema
 #' as NA-only columns for consistency with CAM's shape, not because
 #' CELESTE actually computed them.
 #'
@@ -206,7 +206,7 @@ tidy_hydroweight_harvest_regen_combined_summary <- function(hw) {
 #' @param output_dir      Character. Directory containing
 #'   CELESTE_engine_hydroweight.csv (e.g. here("output/CELESTE_engine")).
 #' @param hydroweight_file Character. Filename within output_dir. Default
-#'   matches run_celeste_engine_hydroweight.R's actual output name.
+#'   matches run_celeste.R's actual output name.
 #'
 #' @return Invisibly, a named list of the 4 tidy tibbles, already written
 #'   to disk.

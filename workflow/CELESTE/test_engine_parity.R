@@ -36,10 +36,11 @@
 #       03_prepare_streams_burn.R), so burning itself is byte-identical
 #       logic either way.
 #     - Breach (dist = 10, fill = TRUE) and D8 pointer calls in
-#       engine/02_prepare_terrain.R's prepare_raw_dem_tier() use the exact
-#       same WhiteboxTools parameters as stream/04_run_whitebox.R's
-#       max_dist = 10, fill = TRUE (confirmed by reading both — not
-#       assumed).
+#       engine/02_prepare_terrain.R's prepare_raw_dem_tier() used the exact
+#       same WhiteboxTools parameters as the (since-retired)
+#       stream/04_run_whitebox.R's max_dist = 10, fill = TRUE (confirmed by
+#       reading both at the time — not assumed; see git history for that
+#       file if you need to re-verify).
 #     - stream_threshold = 1000, snap_dist = 200, min_cells = 10 — same
 #       values run_celeste.R passes (default_stream_threshold, snap_dist,
 #       min_cells).
