@@ -72,8 +72,15 @@ rsconnect/
 *.html
 # Quarto project cache
 .quarto/
+# LaTeX intermediates from a PDF render (via TinyTeX)
+*.tex
+*.log
 # rosm package basemap tile cache (downloaded OSM tiles for map figures)
 rosm.cache/
+
+# Default R graphics device output (created when a script plots without an
+# explicit device — an accidental artifact, not a real deliverable)
+Rplots.pdf
 
 # -- Positron / VS Code -------------------------------------------------------
 .vscode/
