@@ -1,4 +1,4 @@
-# 01_group_sites.R
+# group_sites.R
 # ---------------------------------------------------------------------------
 # Groups sites into processing units, builds group AOIs, and sets up the
 # cache and output directory structure.

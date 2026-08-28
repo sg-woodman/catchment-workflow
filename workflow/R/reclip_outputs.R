@@ -1,4 +1,4 @@
-# 07_reclip_outputs.R
+# reclip_outputs.R
 # ---------------------------------------------------------------------------
 # Re-clips flowlines and rasters using the clipped catchment polygons produced
 # by 06_remove_upstream.R (stream) or 04_remove_upstream_lakes.R (lake).

@@ -1,4 +1,4 @@
-# 03_burn_streams.R
+# burn_streams.R
 # ---------------------------------------------------------------------------
 # Identifies which NHN GDB files intersect each group AOI, extracts the
 # relevant flowline and waterbody layers, and optionally burns the stream

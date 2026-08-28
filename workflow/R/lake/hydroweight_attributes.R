@@ -1,4 +1,4 @@
-# 05_hydroweight_attributes.R
+# hydroweight_attributes.R
 # ---------------------------------------------------------------------------
 # Computes inverse distance-weighted catchment attributes for lake sites using
 # the hydroweight package.

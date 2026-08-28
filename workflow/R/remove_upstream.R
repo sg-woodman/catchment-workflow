@@ -1,4 +1,4 @@
-# 06_remove_upstream.R
+# remove_upstream.R
 # ---------------------------------------------------------------------------
 # Clips each site's catchment to remove the contributing area of any nested
 # upstream sites. This is the river-site equivalent of the upstream lake

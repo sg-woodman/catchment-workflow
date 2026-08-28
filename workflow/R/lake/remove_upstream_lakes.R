@@ -1,4 +1,4 @@
-# 04_remove_upstream_lakes.R
+# remove_upstream_lakes.R
 # ---------------------------------------------------------------------------
 # Clips each target lake catchment to remove the contributing area of any
 # upstream lakes found within the catchment boundary.

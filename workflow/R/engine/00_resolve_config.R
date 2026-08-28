@@ -30,8 +30,8 @@
 # Dependencies: sf, terra, fs, glue, cli (via utils.R)
 # ---------------------------------------------------------------------------
 
-# Null-coalescing operator — same definition workflow/R/stream/
-# 06_hydroweight_attributes.R uses locally. Defined here (not added to the
+# Null-coalescing operator — same definition
+# workflow/R/stream/hydroweight_attributes.R uses locally. Defined here (not added to the
 # shared utils.R) so the engine tree stays self-contained and doesn't touch
 # any file outside workflow/R/engine/.
 `%||%` <- function(x, y) if (!is.null(x)) x else y

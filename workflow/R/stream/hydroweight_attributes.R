@@ -1,9 +1,9 @@
-# 06_hydroweight_attributes.R
+# hydroweight_attributes.R
 # ---------------------------------------------------------------------------
 # Computes inverse distance-weighted catchment attributes for stream sites
 # using the hydroweight package, with the site's pour point as the O-scheme
-# target (in place of the lake polygon used by workflow/R/lake/
-# 05_hydroweight_attributes.R — see that file for the shared conceptual
+# target (in place of the lake polygon used by
+# workflow/R/lake/hydroweight_attributes.R — see that file for the shared conceptual
 # design; this module differs in three structural ways):
 #
 #   1. target_O is a POINT (output/<site_id>/pour_point.gpkg) rather than a

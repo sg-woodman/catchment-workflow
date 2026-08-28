@@ -1,4 +1,4 @@
-# 01_match_lake_polygons.R
+# match_lake_polygons.R
 # ---------------------------------------------------------------------------
 # Matches a table of lake sites to lake polygons from an OHN/OIH waterbody
 # dataset using a three-pass strategy:

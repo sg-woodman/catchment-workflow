@@ -1,4 +1,4 @@
-# 05_delineate_sites.R
+# delineate_sites.R
 # ---------------------------------------------------------------------------
 # Delineates catchments for each site using the group-level Whitebox outputs.
 #

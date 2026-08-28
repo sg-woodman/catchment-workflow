@@ -1,4 +1,4 @@
-# 08_catchment_metrics.R
+# catchment_metrics.R
 # ---------------------------------------------------------------------------
 # Calculates catchment morphometric metrics for all delineated sites and
 # compiles results into a summary tibble and a gt reference table.
