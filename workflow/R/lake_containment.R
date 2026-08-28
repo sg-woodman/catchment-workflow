@@ -289,17 +289,30 @@ validate_catchment_lake_intersections <- function(
 #' standard practice uses to guarantee flow converges to one outlet across a
 #' flat — the standard FlattenLakes -> FillDepressions -> D8Pointer sequence.
 #'
+#' ACCUMULATES across repeated calls, keyed by lake_polys' OGF_ID column,
+#' via the persisted lakes_to_flatten.shp itself: a lake flattened in an
+#' earlier call stays flattened in every later rebuild, even if that later
+#' call's lake_polys doesn't include it. This matters because a corrected
+#' pointer is shared by every site redelineated against it — a second
+#' correction pass that only knew about its own newly-flagged lakes was
+#' confirmed to silently UN-flatten the first pass's lakes for any site
+#' redelineated in that second pass, reverting them back toward their
+#' original bisected state. Because of this, the caller should never delete
+#' output_subdir's contents to "force a rebuild" — the function detects a
+#' grown lake set on its own (comparing OGF_IDs) and rebuilds automatically;
+#' deleting the directory would just discard the accumulated history and
+#' reintroduce the bug above.
+#'
 #' @param cache_dir     Character. Project cache directory (must contain
 #'   dem.tif, already cropped/reprojected by the engine's terrain prep)
-#' @param lake_polys    sf object. The lake polygon(s) to flatten (typically
-#'   just the ones flagged by validate_catchment_lake_intersections())
+#' @param lake_polys    sf object with an OGF_ID column. The lake polygon(s)
+#'   to flatten (typically just the ones flagged by
+#'   validate_catchment_lake_intersections()) — merged with, not replacing,
+#'   whatever's already accumulated from previous calls.
 #' @param output_subdir Character. Subdirectory of cache_dir to write
 #'   corrected products into. Default "lake_corrected".
 #'
-#' @return Character. Path to the corrected flow_pointer.tif. Cache-checked
-#'   — if the flagged-lake set changes on a later run, delete
-#'   cache_dir/<output_subdir>/ manually before re-running (this codebase's
-#'   usual reset_*()-driven cache convention, not auto-invalidated here).
+#' @return Character. Path to the corrected flow_pointer.tif.
 prepare_lake_corrected_flow_pointer <- function(cache_dir, lake_polys, output_subdir = "lake_corrected") {
   dem_path <- fs::path(cache_dir, "dem.tif")
   if (!cache_exists(dem_path)) {
@@ -310,26 +323,65 @@ prepare_lake_corrected_flow_pointer <- function(cache_dir, lake_polys, output_su
   ensure_dir(out_dir)
   pointer_path <- fs::path(out_dir, "flow_pointer.tif")
 
-  if (cache_exists(pointer_path)) {
+  # The accumulation manifest is a GPKG, not a Shapefile — confirmed
+  # empirically that writing OGF_ID (9-digit integers) to a .shp's .dbf
+  # triggers a GDAL "not successfully written, possibly due to too large a
+  # number" warning; it happened to round-trip correctly in one test, but
+  # that's an unreliable numeric-field-width edge case to depend on for
+  # the exact-match logic below, not something to build accumulation
+  # correctness on. WhiteboxTools' own vector reader is the thing that
+  # requires Shapefile specifically (confirmed empirically: a .gpkg input
+  # crashes FlattenLakes with "Unrecognized ShapeType" — its shapefile
+  # reader is being handed GPKG bytes) — so a separate, disposable .shp
+  # (attributes don't matter for that call, only geometry) is written just
+  # before each wbt_flatten_lakes() call, from whatever the accumulated
+  # GPKG says at that point. Same Shapefile constraint
+  # workflow/R/engine/04_delineate_site.R's write_pour_point_shp_dynamic()/
+  # stream/delineate_sites.R's write_pour_point_shp() already work around
+  # for wbt_watershed()'s pour_pts argument.
+  lakes_gpkg <- fs::path(out_dir, "lakes_to_flatten.gpkg")
+  lakes_shp  <- fs::path(out_dir, "lakes_to_flatten_wbt_input.shp")
+
+  dem_rast <- terra::rast(dem_path)
+  lake_polys_proj <- sf::st_transform(lake_polys, terra::crs(dem_rast)) |>
+    sf::st_make_valid()
+
+  if (cache_exists(lakes_gpkg)) {
+    previous <- sf::st_read(lakes_gpkg, quiet = TRUE)
+    new_ids <- setdiff(lake_polys_proj$OGF_ID, previous$OGF_ID)
+    if (length(new_ids) == 0 && cache_exists(pointer_path)) {
+      cw_inform(glue::glue(
+        "Lake-corrected flow pointer already covers all {nrow(lake_polys_proj)} ",
+        "requested lake(s) — skipping: {pointer_path}"
+      ))
+      return(pointer_path)
+    }
+    # Reduce both to just OGF_ID + geometry and force a common geometry
+    # column name before combining — lake_polys_proj's geometry column name
+    # depends on lakes_path's own schema, and may not match previous's;
+    # dplyr::bind_rows()/rbind.sf() need matching names to align.
+    previous_min <- previous["OGF_ID"]
+    new_min <- lake_polys_proj["OGF_ID"]
+    sf::st_geometry(previous_min) <- "geometry"
+    sf::st_geometry(new_min) <- "geometry"
+    lake_polys_proj <- rbind(previous_min, new_min) |>
+      dplyr::distinct(OGF_ID, .keep_all = TRUE)
+    cw_inform(glue::glue(
+      "Accumulating {length(new_ids)} newly-flagged lake(s) with ",
+      "{nrow(previous)} previously-flattened lake(s) -> {nrow(lake_polys_proj)} total."
+    ))
+  } else if (cache_exists(pointer_path)) {
     cw_inform(glue::glue("Lake-corrected flow pointer found in cache — skipping: {pointer_path}"))
     return(pointer_path)
   }
 
-  dem_rast <- terra::rast(dem_path)
-
-  # WhiteboxTools' vector reader requires Shapefile for this tool (confirmed
-  # empirically: a .gpkg input crashes FlattenLakes with "Unrecognized
-  # ShapeType" — its shapefile reader is being handed GPKG bytes). Same
-  # constraint workflow/R/engine/04_delineate_site.R's write_pour_point_shp_
-  # dynamic()/stream/delineate_sites.R's write_pour_point_shp() already work
-  # around for wbt_watershed()'s pour_pts argument.
-  lakes_shp <- fs::path(out_dir, "lakes_to_flatten.shp")
-  lake_polys_proj <- sf::st_transform(lake_polys, terra::crs(dem_rast)) |>
-    sf::st_make_valid()
+  sf::st_write(lake_polys_proj, lakes_gpkg, delete_dsn = TRUE, quiet = TRUE)
+  # Disposable — WBT input only, attribute values (including OGF_ID) don't
+  # need to survive this round-trip, only geometry does.
   sf::st_write(lake_polys_proj, lakes_shp, delete_dsn = TRUE, quiet = TRUE)
 
   cw_inform(glue::glue(
-    "Flattening {nrow(lake_polys_proj)} lake(s) into {dem_path}..."
+    "Flattening {nrow(lake_polys_proj)} lake(s) (accumulated) into {dem_path}..."
   ))
 
   flattened_path <- fs::path(out_dir, "dem_lakes_flattened.tif")

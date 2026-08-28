@@ -32,13 +32,21 @@
 #   source(here::here("workflow/CAM/run_cam_streams.R"))
 #   source(here::here("workflow/CAM/fix_lake_bisection.R"))
 #
-# Safe to re-run: validate_catchment_lake_intersections() and
-# rerun_engine_sites() are both idempotent — a clean second run finds
-# nothing left to flag and does nothing further, except that
-# prepare_lake_corrected_flow_pointer()'s cache under
-# cache_dir/lake_corrected/ is NOT auto-invalidated if the flagged-lake set
-# changes on a later run (e.g. new sites added) — delete that directory
-# manually first if so.
+# Safe to re-run, INCLUDING as a second/third correction pass after
+# reviewing residual flags: validate_catchment_lake_intersections() and
+# rerun_engine_sites() are idempotent, and prepare_lake_corrected_flow_
+# pointer() self-detects a grown flagged-lake set and accumulates
+# (persisted in cache_dir/lake_corrected/lakes_to_flatten.shp) — never
+# delete that directory between passes, only the accumulation makes it safe
+# for a later pass to redelineate a site without silently un-flattening an
+# earlier pass's fix for some OTHER site sharing the same corrected pointer
+# (confirmed: deleting it before a second pass reverted 4 sites' fixes).
+#
+# Densely-lake-packed clusters (confirmed: SUD17/SUD102/SUD103/SUD200) can
+# still show a whack-a-mole pattern across passes — fixing one site's
+# boundary can newly, slightly bisect a different nearby lake that was
+# clean before. Review output/CAM/stream_delineation/lake_intersection_
+# report.csv after each pass rather than assuming a pass converges to zero.
 # =============================================================================
 
 source(here::here("workflow/R/lake_containment.R"))
