@@ -40,6 +40,16 @@
 # from the retired workflow/R/lake/03_delineate_lakes.R's
 # rerun_watershed_lake().
 #
+# A fourth scenario, point-based projects: the snapped pour point is fine,
+# but the catchment traced from it bisects some OTHER lake sitting along its
+# flow path (nothing in point-mode delineation is lake-aware — see
+# workflow/R/lake_containment.R). Reuses scenario 2's machinery via
+# rerun_engine_sites(edited_snap_site_ids = ...,
+# flow_pointer_override_path = <corrected pointer>) — same "re-trace from
+# the existing snapped point" contract, just against a lake-flattened,
+# re-derived D8 pointer (prepare_lake_corrected_flow_pointer()) instead of
+# the group's own flow_pointer.tif. See workflow/CAM/fix_lake_bisection.R.
+#
 # Requires already sourced: workflow/R/utils.R, code/reset_workflow.R
 # (reset_site()), workflow/R/stream/delineate_sites.R (load_group_
 # rasters(), delineate_watershed(), clip_rasters_to_catchment(),
@@ -67,10 +77,18 @@
 #' @param output_dir     Character. Root output directory
 #' @param min_cells      Integer. Minimum cells threshold for flagging.
 #'   Default 10.
+#' @param flow_pointer_override SpatRaster, optional. When supplied, used in
+#'   place of the group's own flow_pointer.tif for the watershed trace —
+#'   for the "the snapped pour point is fine, the flow field used to trace
+#'   from it isn't" case (e.g. a lake-flattened, re-derived D8 pointer from
+#'   prepare_lake_corrected_flow_pointer(), workflow/R/lake_containment.R).
+#'   Default NULL (use the group's own flow_pointer.tif, existing
+#'   behavior).
 #'
 #' @return Single-row tibble with delineation result for this site
 rerun_engine_site_watershed <- function(
-  site_id, sites, group_manifest, config, output_dir, min_cells = 10
+  site_id, sites, group_manifest, config, output_dir, min_cells = 10,
+  flow_pointer_override = NULL
 ) {
   site_dir <- site_output_dir(output_dir, site_id)
   snapped_shp <- fs::path(site_dir, "pour_point_snapped.shp")
@@ -96,11 +114,15 @@ rerun_engine_site_watershed <- function(
   ))
 
   group_rasters <- load_group_rasters(grp_cache, grp)
+  flow_pointer <- flow_pointer_override %||% group_rasters$flow_pointer
+  if (!is.null(flow_pointer_override)) {
+    cw_inform(glue::glue("Site '{site_id}': using overridden flow pointer for watershed trace."))
+  }
 
   tryCatch(
     {
       watershed_tif <- delineate_watershed(
-        snapped_shp = snapped_shp, flow_pointer = group_rasters$flow_pointer,
+        snapped_shp = snapped_shp, flow_pointer = flow_pointer,
         site_dir = site_dir, site_id = site_id
       )
 
@@ -345,6 +367,12 @@ rerun_engine_lake_site_watershed <- function(
 #'   for resnap_site_ids. Default 200.
 #' @param min_cells      Integer. Minimum cells threshold for flagging.
 #'   Default 10.
+#' @param flow_pointer_override_path Character, optional. Path to an
+#'   alternate flow_pointer.tif (e.g. from
+#'   prepare_lake_corrected_flow_pointer(), workflow/R/lake_containment.R),
+#'   used for every site in edited_snap_site_ids instead of the group's own
+#'   flow_pointer.tif. Does not apply to resnap_site_ids (full re-derivation
+#'   always uses the group's own terrain). Default NULL (existing behavior).
 #'
 #' @return Character vector of all sites actually re-run downstream
 #'   (resnap_site_ids + edited_snap_site_ids + any cascaded neighbor)
@@ -352,7 +380,8 @@ rerun_engine_sites <- function(
   resnap_site_ids = character(0),
   edited_snap_site_ids = character(0),
   sites, group_manifest, config, output_dir, cache_dir = NULL,
-  loi_layers = NULL, snap_dist = 200, min_cells = 10
+  loi_layers = NULL, snap_dist = 200, min_cells = 10,
+  flow_pointer_override_path = NULL
 ) {
   target_ids <- union(resnap_site_ids, edited_snap_site_ids)
   if (length(target_ids) == 0) {
@@ -373,8 +402,16 @@ rerun_engine_sites <- function(
 
   # -- Delineation: edited snapped point (no re-snap) ------------------------
   if (length(edited_snap_site_ids) > 0) {
+    flow_pointer_override <- if (!is.null(flow_pointer_override_path)) {
+      terra::rast(flow_pointer_override_path)
+    } else {
+      NULL
+    }
     purrr::walk(edited_snap_site_ids, function(sid) {
-      rerun_engine_site_watershed(sid, sites, group_manifest, config, output_dir, min_cells)
+      rerun_engine_site_watershed(
+        sid, sites, group_manifest, config, output_dir, min_cells,
+        flow_pointer_override = flow_pointer_override
+      )
     })
   }
 
