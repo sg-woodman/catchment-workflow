@@ -6,8 +6,8 @@
 # project in this repo now, CELESTE included. Supersedes an earlier,
 # non-modular run_celeste.R that ran directly on workflow/R/stream/ (retired
 # 2026-08 — see git history if you need it; workflow/R/stream/'s remaining
-# files — 01_group_sites.R, 03_burn_streams.R, 05_delineate_sites.R,
-# 06_hydroweight_attributes.R — are genuinely shared building blocks the
+# files — group_sites.R, burn_streams.R, delineate_sites.R,
+# hydroweight_attributes.R — are genuinely shared building blocks the
 # engine reuses directly, not old-pipeline-specific, and stay in place).
 #
 # Uses the CORRECT, current site coordinates
@@ -19,7 +19,7 @@
 #
 # WORKFLOW STAGES:
 #   Stage 1 — Resolve config, build group manifest (HydroBasins level-6
-#              grouping, delegates to stream/01_group_sites.R unmodified)
+#              grouping, delegates to stream/group_sites.R unmodified)
 #   Stage 2 — Prepare terrain (crop MRDEM, burn NHN streams in, breach,
 #              D8 pointer, flow accumulation, extract streams) — once per
 #              group, the expensive part. Logs burn-in status per group;

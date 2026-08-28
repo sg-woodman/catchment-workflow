@@ -26,7 +26,7 @@
 #   one file already covers several SITES, and per-site resolution means
 #   figuring out which file a given site_id's data lives in, then exposing
 #   that shared file under a per-site name so the existing path_template
-#   contract (06_hydroweight_attributes.R's resolve_site_loi_raster())
+#   contract (stream/hydroweight_attributes.R's resolve_site_loi_raster())
 #   works unmodified. build_cam_ndvi_site_map() + prepare_cam_ndvi_site_
 #   rasters() below do exactly that (materializing a per-site SYMLINK, not
 #   a full copy, to the shared per-group cleaned raster — cheap, and

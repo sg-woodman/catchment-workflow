@@ -17,12 +17,12 @@
 #      output directory
 #   5. Combine all clipped catchments into a single GeoPackage for inspection
 #
-# Run after 05_delineate_sites.R.
+# Run after delineate_sites.R.
 #
 # Inputs:
 #   sites      : Validated sites tibble from validate_sites()
 #   output_dir : Root output directory (contains one subfolder per site_id,
-#                each with catchment.gpkg from 05_delineate_sites.R)
+#                each with catchment.gpkg from delineate_sites.R)
 #
 # Outputs (per site, written to output/<site_id>/):
 #   catchment_clipped.gpkg : Catchment polygon with nested upstream site
@@ -59,7 +59,7 @@ remove_upstream_catchments <- function(sites, output_dir) {
 
   if (nrow(catchment_pool) == 0) {
     cw_abort(
-      "No catchment.gpkg files found. Run 05_delineate_sites.R first."
+      "No catchment.gpkg files found. Run delineate_sites.R first."
     )
   }
 

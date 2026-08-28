@@ -11,7 +11,7 @@
 #   3. Build a pool of all catchments (target sites + upstream lakes)
 #   4. For each target site, erase all smaller intersecting catchments
 #   5. Write catchment_clipped.gpkg per site (same convention as the stream
-#      06_remove_upstream.R) so downstream shared modules work identically
+#      remove_upstream.R) so downstream shared modules work identically
 #
 # Run after 03_delineate_lakes.R.
 #
@@ -21,7 +21,7 @@
 #                      polygons (used to exclude target lakes from upstream
 #                      candidates)
 #   lakes_path       : Path to OHN/OIH waterbody layer (same as used in
-#                      01_match_lake_polygons.R)
+#                      match_lake_polygons.R)
 #   cache_dir        : Project cache directory
 #   output_dir       : Root output directory
 #

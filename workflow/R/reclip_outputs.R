@@ -1,14 +1,14 @@
 # reclip_outputs.R
 # ---------------------------------------------------------------------------
 # Re-clips flowlines and rasters using the clipped catchment polygons produced
-# by 06_remove_upstream.R (stream) or 04_remove_upstream_lakes.R (lake).
+# by remove_upstream.R (stream) or remove_upstream_lakes.R (lake).
 #
 # Rather than overwriting the original outputs, this writes new files with a
 # "_clipped" suffix so both versions remain available for comparison.
 #
 # Works for BOTH stream and lake projects:
 #
-#   Stream projects: pass group_manifest (from 01_group_sites.R). Source
+#   Stream projects: pass group_manifest (from group_sites.R). Source
 #     rasters are loaded from each site's group cache directory. Flowlines
 #     (streams_clipped.gpkg) are also generated.
 #
@@ -22,7 +22,7 @@
 #   streams_clipped.gpkg   : NHN flowlines clipped to clipped catchment
 #                            (stream projects only)
 #
-# Run after 06_remove_upstream.R (stream) or 04_remove_upstream_lakes.R (lake).
+# Run after remove_upstream.R (stream) or remove_upstream_lakes.R (lake).
 #
 # Dependencies: sf, terra, dplyr, purrr, fs, cli (via utils.R)
 # ---------------------------------------------------------------------------

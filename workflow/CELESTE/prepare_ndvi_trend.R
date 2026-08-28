@@ -10,7 +10,7 @@
 # cache/CELESTE/hydroweight_loi/ndvi_trend/<group_id>.tif, 2 bands
 # ("slope", "p_value") — matches sens_slope_trend()'s return shape exactly,
 # so no reshaping is needed before handing it to the hydroweight stage as a
-# path_lazy LOI (06_hydroweight_attributes.R already loops any multi-layer
+# path_lazy LOI (stream/hydroweight_attributes.R already loops any multi-layer
 # continuous LOI one band at a time and uses each band's own name() as the
 # output column prefix — see run_loi_attributes_stream_multilayer()).
 #

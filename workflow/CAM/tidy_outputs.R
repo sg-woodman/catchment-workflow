@@ -97,7 +97,7 @@ normalize_scheme <- function(x) {
 
 #' Catchment metric columns that are structurally always-NA for CAM's stream
 #' sites (lake morphometrics + the lake-dependent catchment-area:lake-area
-#' ratio — carried over from the shared stream+lake 08_catchment_metrics.R
+#' ratio — carried over from the shared stream+lake catchment_metrics.R
 #' module, but stream sites have no lake polygon to compute them from).
 #' Dropped from the numeric long output — see tidy_catchment_metrics().
 CATCHMENT_METRICS_LAKE_ONLY_COLS <- c(

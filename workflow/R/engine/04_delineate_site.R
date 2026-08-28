@@ -204,7 +204,7 @@ delineate_engine_point_site <- function(
 
 #' Write a single site's pour point as a .shp file, in the run's resolved
 #' working CRS — CRS-dynamic variant of workflow/R/stream/
-#' 05_delineate_sites.R's write_pour_point_shp() (which hardcodes EPSG:3979
+#' delineate_sites.R's write_pour_point_shp() (which hardcodes EPSG:3979
 #' to match MRDEM; this variant matches whatever DEM the run was resolved
 #' against instead).
 write_pour_point_shp_dynamic <- function(site, tmp_dir, working_crs) {
@@ -217,7 +217,7 @@ write_pour_point_shp_dynamic <- function(site, tmp_dir, working_crs) {
 
 #' Convert a watershed raster to a catchment polygon, in the run's resolved
 #' working CRS — CRS-dynamic variant of workflow/R/stream/
-#' 05_delineate_sites.R's watershed_to_polygon().
+#' delineate_sites.R's watershed_to_polygon().
 watershed_to_polygon_dynamic <- function(watershed_tif, site_dir, site_id, working_crs) {
   catchment_shp <- fs::path(site_dir, "catchment_tmp.shp")
 

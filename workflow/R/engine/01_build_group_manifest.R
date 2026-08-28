@@ -18,7 +18,7 @@
 #     workflow/R/utils.R::build_group_aoi() (HydroBasins level-6 union per
 #     user-assigned group_id). Requires sites already carry a group_id
 #     column and requires workflow/R/utils.R + workflow/R/stream/
-#     01_group_sites.R to be sourced by the caller.
+#     group_sites.R to be sourced by the caller.
 #
 # Dependencies: sf, dplyr, purrr, fs, glue, cli (via utils.R)
 # ---------------------------------------------------------------------------

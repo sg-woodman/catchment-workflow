@@ -20,12 +20,12 @@
 #       NULL resolves to MRDEM's native EPSG:3979, matching CELESTE's
 #       target_crs = 3979).
 #     - grouping$strategy = "hydrobasins" delegates to the SAME
-#       stream/01_group_sites.R::build_group_manifest() run_celeste.R calls
+#       stream/group_sites.R::build_group_manifest() run_celeste.R calls
 #       directly, with the same hydrobasins_dir/default_buffer_m — the
 #       group AOI is not just similar, it's produced by identical code.
 #     - streams_burn = "supplied", pointing at
 #       cache/CELESTE/TUR/flowlines.gpkg — the ACTUAL merged/clipped NHN
-#       flowlines run_celeste.R's own Stage 3 (stream/03_burn_streams.R)
+#       flowlines run_celeste.R's own Stage 3 (stream/burn_streams.R)
 #       already produced and burned into TUR's DEM. Re-deriving the NHN
 #       merge from scratch would also test the NHN-loading logic, which is
 #       orthogonal to this test's actual question ("does the engine's
@@ -53,8 +53,8 @@
 # and Jaccard/IoU (intersection-over-union), which catches shape
 # differences an area-only comparison would miss (e.g. two catchments with
 # the same area but shifted boundaries). NOT compared: remove-upstream/
-# reclip/metrics/hydroweight — those are shared modules (06_remove_upstream.R,
-# 07_reclip_outputs.R, 08_catchment_metrics.R, stream/06_hydroweight_
+# reclip/metrics/hydroweight — those are shared modules (remove_upstream.R,
+# reclip_outputs.R, catchment_metrics.R, stream/hydroweight_
 # attributes.R) already exercised byte-identically by both CAM projects
 # and CELESTE itself; the part actually unique to "does the engine's own
 # delineation logic work" is Stages 1-5 (group manifest -> terrain ->

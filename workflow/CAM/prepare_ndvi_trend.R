@@ -74,7 +74,7 @@
 #'   trend raster is written to cache_dir/hydroweight_loi/ndvi_trend_src/
 #'   <raw file's basename>, and each site gets a symlink to it at
 #'   cache_dir/hydroweight_loi/ndvi_trend/<site_id>.tif (the path
-#'   06_hydroweight_attributes.R's resolve_site_loi_raster() expects for a
+#'   stream/hydroweight_attributes.R's resolve_site_loi_raster() expects for a
 #'   path_template LOI).
 #' @param ndvi_dir   Character. Directory of raw NDVI export files.
 #'   Default CAM_NDVI_DIR (from prepare_ndvi.R).

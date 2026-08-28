@@ -257,7 +257,7 @@ print(group_manifest)
 prepare_engine_terrain(config, group_manifest)
 
 # Fix for remove_upstream_lake_catchments() (workflow/R/lake/
-# 04_remove_upstream_lakes.R), which hardcodes cache_dir/d8_pntr.tif — the
+# remove_upstream_lakes.R), which hardcodes cache_dir/d8_pntr.tif — the
 # engine writes flow_pointer.tif instead. Symlink, not a copy — cheap, and
 # terra::rast() reads through a symlink identically to a real file
 # (confirmed elsewhere in this project). Same pattern engine/02_prepare_

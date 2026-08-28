@@ -14,10 +14,10 @@
 #      CELESTE groups span separate HydroBasins regions, each with its own
 #      DEM, unlike CAM's single contiguous lake project.
 #   3. Attributes are computed for BOTH catchment versions — the unclipped
-#      catchment (catchment.gpkg / streams.tif from 05_delineate_sites.R)
+#      catchment (catchment.gpkg / streams.tif from delineate_sites.R)
 #      and the upstream-removed catchment (catchment_clipped.gpkg /
-#      streams_clipped.tif from 06_remove_upstream.R + 07_reclip_outputs.R)
-#      — tagged by a "version" column, matching 08_catchment_metrics.R's
+#      streams_clipped.tif from remove_upstream.R + reclip_outputs.R)
+#      — tagged by a "version" column, matching catchment_metrics.R's
 #      convention.
 #
 # Supports the same categorical/continuous loi_layers descriptors as the
@@ -495,7 +495,7 @@ process_hw_site_stream <- function(
   # st_make_valid() defensively — hydroweight::hydroweight() does its own
   # internal GEOS geometry processing (union/buffer/etc. against the clip
   # region) and a self-touching artifact in a raster-to-polygon conversion
-  # upstream (watershed_to_polygon() in 05_delineate_sites.R) is enough to
+  # upstream (watershed_to_polygon() in delineate_sites.R) is enough to
   # trip a "TopologyException: side location conflict" there even though
   # the polygon reads back fine on its own. Confirmed directly: 3 sites
   # (NBI1/NBI4/NBI5, unclipped version only — the largest unclipped

@@ -4,8 +4,8 @@
 # compiles results into a summary tibble and a gt reference table.
 #
 # Computes metrics for BOTH the unclipped catchment (catchment.gpkg, dem.tif
-# from 05_delineate_sites.R) and the clipped catchment (catchment_clipped.gpkg,
-# dem_clipped.tif from 07_reclip_outputs.R), producing two rows per site
+# from delineate_sites.R) and the clipped catchment (catchment_clipped.gpkg,
+# dem_clipped.tif from reclip_outputs.R), producing two rows per site
 # tagged by a "version" column ("unclipped" / "clipped"). If a site has no
 # clipped outputs, a warning is issued and that row is omitted (the unclipped
 # row is still produced).
@@ -39,7 +39,7 @@
 #                 .tif). When NULL, per-site streams_clipped.* files are
 #                 auto-detected in each site output directory.
 #
-# Run after 07_reclip_outputs.R (clipped rows will be skipped with a warning
+# Run after reclip_outputs.R (clipped rows will be skipped with a warning
 # if 07 has not been run for a site).
 #
 # Dependencies: sf, terra, dplyr, purrr, tibble, readr, gt, fs, cli (via utils.R)
