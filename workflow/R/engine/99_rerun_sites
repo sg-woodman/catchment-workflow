@@ -494,7 +494,7 @@ combine_all_catchments <- function(sites, output_dir) {
 #' Deliberately keyed off n_erased == 0 (remove_upstream_catchments()'s own
 #' signal for "nothing was actually erased"), NOT a numeric comparison of
 #' the two rows' values — the clipped geometry is round-tripped through a
-#' fixed EPSG:3979 working CRS and back (see workflow/R/06_remove_upstream.R)
+#' fixed EPSG:3979 working CRS and back (see workflow/R/remove_upstream.R)
 #' even when nothing is erased, so downstream metrics/hydroweight values
 #' for a genuinely-identical site can differ from their unclipped
 #' counterpart by floating-point noise, which a numeric equality check
