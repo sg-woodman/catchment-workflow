@@ -12,9 +12,10 @@
 #      output/<site_id>/pour_point_snapped.shp in QGIS directly — the raw
 #      coordinate itself is fine, and re-snapping would just overwrite the
 #      manual correction. Use rerun_engine_sites(edited_snap_site_ids = ...),
-#      which calls rerun_engine_site_watershed() (below) instead — mirrors
-#      workflow/R/stream/99_rerun_sites's rerun_site_watershed(), CRS-dynamic
-#      instead of hardcoded EPSG:3979.
+#      which calls rerun_engine_site_watershed() (below) instead — a CRS-
+#      dynamic descendant of the retired pre-engine stream/99_rerun_sites's
+#      rerun_site_watershed() (see git history), which was hardcoded to
+#      EPSG:3979.
 #
 # rerun_engine_sites() handles both in one call, then re-runs the shared
 # downstream stages (remove-upstream, reclip, metrics, hydroweight) —
@@ -54,9 +55,9 @@
 #' QGIS to correct a misaligned snap. Redoes watershed delineation, polygon
 #' conversion, and raster clipping — does NOT rewrite pour_point.shp or
 #' rerun the snapping step; it reads the edited pour_point_snapped.shp
-#' directly, same contract as workflow/R/stream/99_rerun_sites's
-#' rerun_site_watershed(), CRS-dynamic (config$working_crs) instead of
-#' hardcoded EPSG:3979.
+#' directly, same contract as the retired pre-engine stream/99_rerun_sites's
+#' rerun_site_watershed() (see git history), CRS-dynamic
+#' (config$working_crs) instead of hardcoded EPSG:3979.
 #'
 #' @param site_id        Character. Site identifier
 #' @param sites          Validated sites tibble (with group_id) from
