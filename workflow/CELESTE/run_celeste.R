@@ -108,6 +108,7 @@ source(here("workflow/R/engine/00_resolve_config.R"))
 source(here("workflow/R/engine/01_build_group_manifest.R"))
 source(here("workflow/R/engine/02_prepare_terrain.R"))
 source(here("workflow/R/engine/03_prepare_streams_burn.R"))
+source(here("workflow/R/engine/prepare_lake_conditioning.R")) # resolve_lake_conditioning() -- opt-in via config$lake_conditioning, off by default
 source(here("workflow/R/engine/04_delineate_site.R"))
 source(here("workflow/R/engine/99_rerun_sites")) # drop_redundant_clipped_rows(); also rerun_engine_site_watershed()/rerun_engine_sites() for post-hoc pour-point corrections
 source(here("workflow/raster_attributes.R")) # sens_slope_trend(), rasterize_competing_classes() — used by the CELESTE prepare_*.R scripts below

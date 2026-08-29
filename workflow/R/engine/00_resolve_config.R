@@ -21,6 +21,14 @@
 #                    whenever a source's CRS differs from working_crs)
 #   stream_threshold = integer
 #   streams_burn   = list(source = "nhn_auto"|"supplied"|"none", path = ...)
+#   lake_conditioning = list(source = "nhn_auto"|"supplied"|"none", path = ...,
+#                    min_area_ha = 1, exclude_types = c("Watercourse"))
+#                    (raw dem tier only, opt-in, default "none" — flattens
+#                    known lakes into the DEM before D8 derivation so every
+#                    site in the group is delineated from one lake-aware
+#                    flow field, instead of reactively correcting individual
+#                    bisected catchments after the fact post-hoc — see
+#                    workflow/R/engine/prepare_lake_conditioning.R)
 #   nhn_index_path, nhn_raw_dir
 #   lake_polygons  = sf/SpatVector | NULL   (NULL = point pour point mode)
 #   lake_buffer_m
@@ -115,6 +123,50 @@ resolve_engine_config <- function(config) {
     ))
   }
   config$streams_burn$source <- burn_source
+
+  # -- lake_conditioning: same restriction as streams_burn (raw dem tier
+  # only — flattening has to happen before D8 derivation) and the same
+  # source vocabulary, deliberately mirrored so the two options read the
+  # same way in a run_config. Opt-in, default "none" — a project supplying
+  # an already-conditioned flow_direction/flow_pointer (e.g. CAM's OIH
+  # data) should have zero behavior change; that pre-conditioned surface
+  # is trusted as-is, which is the whole point of supplying one.
+  lake_source <- config$lake_conditioning[["source"]] %||% "none"
+  if (terrain_tier != "dem" && lake_source != "none") {
+    cw_warn(glue::glue(
+      "lake_conditioning$source = '{lake_source}' has no effect — terrain ",
+      "tier is '{terrain_tier}', which is already conditioned. Lake ",
+      "conditioning only applies when starting from a raw dem$path. ",
+      "Treating as 'none'."
+    ))
+    lake_source <- "none"
+  }
+  if (!lake_source %in% c("nhn_auto", "supplied", "none")) {
+    cw_abort(glue::glue(
+      "lake_conditioning$source must be one of 'nhn_auto', 'supplied', 'none' — got '{lake_source}'."
+    ))
+  }
+  if (lake_source == "supplied" && is.null(config$lake_conditioning[["path"]])) {
+    cw_abort("lake_conditioning$source = 'supplied' requires lake_conditioning$path.")
+  }
+  if (lake_source == "nhn_auto" &&
+    (is.null(config$nhn_index_path) || is.null(config$nhn_raw_dir))) {
+    cw_abort(paste(
+      "lake_conditioning$source = 'nhn_auto' requires nhn_index_path and",
+      "nhn_raw_dir to be set in run_config (same fields streams_burn's",
+      "nhn_auto uses)."
+    ))
+  }
+  config$lake_conditioning$source <- lake_source
+  config$lake_conditioning$min_area_ha <- config$lake_conditioning[["min_area_ha"]] %||% 1
+  config$lake_conditioning$exclude_types <- config$lake_conditioning[["exclude_types"]] %||% c("Watercourse")
+  # Lake search is scoped to a buffer around the group's own SITES, not its
+  # full terrain-conditioning AOI — confirmed directly that the latter is
+  # wildly disproportionate for a HydroBasins group (58,928 sq km group AOI
+  # vs. 2,663 sq km for the sites' own bare bounding box, for one real
+  # group). 20 km default is generous relative to observed catchment sizes
+  # (largest confirmed so far ~16 sq km).
+  config$lake_conditioning$site_buffer_m <- config$lake_conditioning[["site_buffer_m"]] %||% 20000
 
   # -- Grouping strategy
   strategy <- config$grouping[["strategy"]] %||% "whole_domain"

@@ -30,7 +30,14 @@
 #                    OIH-specific). No breach.
 #   dem            (raw) only → crop, run 02_prepare_streams_burn.R's
 #                    resolve_streams_burn() [config$streams_burn], then
-#                    wbt_breach_depressions_least_cost() + wbt_d8_pointer().
+#                    wbt_breach_depressions_least_cost(), then — only if
+#                    config$lake_conditioning$source != "none" —
+#                    prepare_lake_conditioning.R's resolve_lake_
+#                    conditioning() (flatten known lakes + fill_depressions
+#                    (fix_flats = TRUE) on top of the breached surface),
+#                    then wbt_d8_pointer(). lake_conditioning defaults to
+#                    "none" (workflow/R/engine/00_resolve_config.R) — a
+#                    no-op, identical to before this feature existed.
 #
 # For every tier, `dem` — if separately supplied (e.g. CAM streams' OIH
 # case: flow_direction for conditioning, dem for the elevation surface used
@@ -190,7 +197,8 @@ prepare_flow_direction_tier <- function(config, aoi, grp_cache, grp) {
   invisible(pointer_path)
 }
 
-#' Raw dem tier: crop, optionally burn streams in, breach, D8 pointer
+#' Raw dem tier: crop, optionally burn streams in, breach, optionally
+#' condition known lakes in, D8 pointer
 prepare_raw_dem_tier <- function(config, aoi, grp_cache, grp, burn) {
   dem_path      <- fs::path(grp_cache, "dem.tif")
   breached_path <- fs::path(grp_cache, "dem_breached.tif")
@@ -215,17 +223,41 @@ prepare_raw_dem_tier <- function(config, aoi, grp_cache, grp, burn) {
     }
   }
 
-  if (!cache_exists(breached_path)) {
+  # lake_conditioning$source defaults to "none" (00_resolve_config.R) — when
+  # off, breach writes directly to breached_path, identical to before this
+  # feature existed. When on, breach writes to an intermediate path first,
+  # and resolve_lake_conditioning() (workflow/R/engine/
+  # prepare_lake_conditioning.R) becomes the step that produces the final
+  # dem_breached.tif — flatten + fill_depressions(fix_flats = TRUE) on top
+  # of the breached surface, so every downstream consumer of the canonical
+  # dem_breached.tif filename (D8 pointer below, hillshade, hydroweight)
+  # sees the fully lake-conditioned surface with no changes needed on
+  # their end. See prepare_lake_conditioning.R's header for why this has
+  # to be breach-THEN-flatten-THEN-fill, not any other order.
+  lake_conditioning_on <- identical(config$lake_conditioning$source, "nhn_auto") ||
+    identical(config$lake_conditioning$source, "supplied")
+
+  breach_output_path <- if (lake_conditioning_on) {
+    fs::path(grp_cache, "dem_breached_prelake.tif")
+  } else {
+    breached_path
+  }
+
+  if (!cache_exists(breach_output_path)) {
     cw_inform(glue::glue("Group '{grp}': breaching depressions..."))
     whitebox::wbt_breach_depressions_least_cost(
       dem    = normalizePath(input_dem, mustWork = TRUE),
-      output = normalizePath(breached_path, mustWork = FALSE),
+      output = normalizePath(breach_output_path, mustWork = FALSE),
       dist   = 10,
       fill   = TRUE
     )
-    if (!cache_exists(breached_path)) {
+    if (!cache_exists(breach_output_path)) {
       cw_abort(glue::glue("Group '{grp}': wbt_breach_depressions_least_cost() did not produce output."))
     }
+  }
+
+  if (lake_conditioning_on && !cache_exists(breached_path)) {
+    resolve_lake_conditioning(config, breach_output_path, breached_path, grp)
   }
 
   if (!cache_exists(pointer_path)) {
