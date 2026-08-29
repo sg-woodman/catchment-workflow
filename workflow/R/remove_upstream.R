@@ -231,6 +231,7 @@ clip_site_catchment <- function(site_id, catchment_pool, output_dir, native_crs 
   nested <- others[intersects_focal & smaller, ]
 
   area_km2_before <- round(focal_area / 1e6, 4)
+  integrity_failed <- FALSE
 
   tryCatch(
     {
@@ -256,6 +257,8 @@ clip_site_catchment <- function(site_id, catchment_pool, output_dir, native_crs 
           erase_mask
         )
 
+        integrity_failed <- FALSE
+
         # Guard against empty result from erasure
         if (nrow(clipped_geom) == 0 || all(sf::st_is_empty(clipped_geom))) {
           cw_warn(glue::glue(
@@ -269,14 +272,70 @@ clip_site_catchment <- function(site_id, catchment_pool, output_dir, native_crs 
             sf::st_as_sf() |>
             dplyr::rename(geometry = x) |>
             dplyr::mutate(site_id = site_id)
+
+          # Guard against a clip that fragments the catchment or erases the
+          # site's own outlet — st_difference() has no concept of "this
+          # erase_mask overlaps the focal catchment in a way that isn't
+          # cleanly nested" and will silently return whatever geometry
+          # results, including a disconnected sliver or a piece that
+          # excludes the pour point. Under normal same-flow-field
+          # delineation nested catchments are always strictly nested, so
+          # this never used to trigger — but it's not guaranteed once any
+          # single site has been redelineated against a different D8
+          # pointer than its neighbors (e.g. a lake-bisection correction,
+          # workflow/R/lake_containment.R), which can leave the corrected
+          # site's boundary and an unrelated neighbor's boundary
+          # overlapping in a way that isn't clean nesting anymore.
+          # Confirmed directly: a lake-correction on CELESTE's BAT2NEW
+          # produced a 3-part disconnected catchment_clipped.gpkg, and one
+          # on SN1UP produced a clipped catchment that no longer contained
+          # its own pour point — both silently written before this check
+          # existed.
+          fragmentation_ok <- nrow(sf::st_cast(clipped, "POLYGON", warn = FALSE)) <=
+            nrow(sf::st_cast(focal, "POLYGON", warn = FALSE))
+
+          pour_point_path <- fs::path(site_output_dir(output_dir, site_id), "pour_point.gpkg")
+          pour_point_ok <- TRUE
+          if (cache_exists(pour_point_path)) {
+            pour_point <- sf::st_read(pour_point_path, quiet = TRUE) |>
+              sf::st_transform(sf::st_crs(clipped))
+            pour_point_ok <- isTRUE(all(sf::st_within(pour_point, clipped, sparse = FALSE)))
+          }
+
+          if (!fragmentation_ok || !pour_point_ok) {
+            reason <- if (!pour_point_ok) {
+              "clip no longer contains the site's own pour point"
+            } else {
+              "clip introduced new disconnected fragment(s) not present in the unclipped catchment"
+            }
+            cw_warn(glue::glue(
+              "Site '{site_id}': clipped catchment failed an integrity check ",
+              "({reason}) — saving unclipped instead. Needs manual review ",
+              "(likely a neighbor whose own catchment used a different D8 ",
+              "pointer, e.g. a lake-bisection correction applied to only ",
+              "one of two mutually-overlapping sites)."
+            ))
+            clipped <- focal
+            integrity_failed <- TRUE
+          }
         }
 
         area_km2_after <- round(
           as.numeric(sf::st_area(clipped$geometry[1])) / 1e6,
           4
         )
-        n_erased <- nrow(nested)
-        erased_ids <- paste(nested$site_id, collapse = ", ")
+        # n_erased/erased_ids describe what's actually reflected in the
+        # WRITTEN geometry — if the integrity check rejected the erase and
+        # fell back to unclipped, nothing was actually erased in the file
+        # that gets written, regardless of how many nested sites were
+        # originally identified as candidates.
+        if (integrity_failed) {
+          n_erased <- 0L
+          erased_ids <- NA_character_
+        } else {
+          n_erased <- nrow(nested)
+          erased_ids <- paste(nested$site_id, collapse = ", ")
+        }
       }
 
       # Attach area metadata before writing
@@ -308,7 +367,11 @@ clip_site_catchment <- function(site_id, catchment_pool, output_dir, native_crs 
 
       tibble::tibble(
         site_id = site_id,
-        status = "success",
+        status = if (integrity_failed) {
+          "success (clip rejected -- integrity check failed, saved unclipped)"
+        } else {
+          "success"
+        },
         n_erased = n_erased,
         erased_site_ids = erased_ids,
         area_km2_before = area_km2_before,
