@@ -186,7 +186,7 @@ validate_catchment_lake_intersections <- function(
   if (nrow(catchments) == 0) {
     cw_warn(glue::glue("No {catchment_file} files found under {output_dir} — nothing to validate."))
     empty <- tibble::tibble(
-      site_id = character(0), OGF_ID = numeric(0), lake_name = character(0),
+      site_id = character(0), OGF_ID = character(0), lake_name = character(0),
       lake_area_ha = numeric(0), pct_lake_outside = numeric(0)
     )
     readr::write_csv(empty, fs::path(output_dir, "lake_intersection_report.csv"))
@@ -206,49 +206,10 @@ validate_catchment_lake_intersections <- function(
   lakes <- lakes[!sf::st_is_empty(lakes), ]
   cw_inform(glue::glue("{nrow(lakes)} candidate lake(s) within site bounding area."))
 
-  results <- purrr::map(seq_len(nrow(catchments)), function(i) {
-    sid <- catchments$site_id[i]
-    cat_geom <- catchments[i, ]
-    hits <- sf::st_intersects(lakes, cat_geom, sparse = FALSE)[, 1]
-    if (sum(hits) == 0) {
-      return(NULL)
-    }
-    cand <- lakes[hits, ]
-    purrr::map(seq_len(nrow(cand)), function(j) {
-      lake_row <- cand[j, ]
-      lake_area_ha <- as.numeric(sf::st_area(lake_row)) / 1e4
-      if (lake_area_ha < min_lake_area_ha) {
-        return(NULL)
-      }
-      if (!is.na(lake_row$WATERBODY_) && lake_row$WATERBODY_ %in% exclude_waterbody_types) {
-        return(NULL)
-      }
-      pct_outside <- tryCatch(
-        lake_containment_pct(lake_row, cat_geom),
-        error = function(e) NA_real_
-      )
-      if (is.na(pct_outside) || pct_outside <= partial_band[1] || pct_outside >= partial_band[2]) {
-        return(NULL)
-      }
-      tibble::tibble(
-        site_id = sid, OGF_ID = lake_row$OGF_ID, lake_name = lake_row$OFFICIAL_N,
-        lake_area_ha = lake_area_ha, pct_lake_outside = pct_outside
-      )
-    }) |>
-      purrr::compact() |>
-      dplyr::bind_rows()
-  }) |>
-    purrr::compact() |>
-    dplyr::bind_rows()
-
-  if (nrow(results) == 0) {
-    results <- tibble::tibble(
-      site_id = character(0), OGF_ID = numeric(0), lake_name = character(0),
-      lake_area_ha = numeric(0), pct_lake_outside = numeric(0)
-    )
-  } else {
-    results <- dplyr::arrange(results, dplyr::desc(lake_area_ha))
-  }
+  results <- flag_catchment_lake_pairs(
+    catchments, lakes, min_lake_area_ha, exclude_waterbody_types,
+    partial_band, waterbody_type_col = "WATERBODY_"
+  )
 
   report_path <- fs::path(output_dir, "lake_intersection_report.csv")
   readr::write_csv(results, report_path)
@@ -263,6 +224,191 @@ validate_catchment_lake_intersections <- function(
   }
 
   results
+}
+
+#' Flag (catchment, lake) pairs where the catchment only partially contains
+#' the lake, operating on already-loaded sf objects
+#'
+#' Pure spatial-join + threshold worker, extracted so it can be shared
+#' between validate_catchment_lake_intersections() (one project-wide lake
+#' source, e.g. CAM's single OHN file) and
+#' validate_catchment_lake_intersections_by_group() (a per-group lake
+#' source, e.g. CELESTE's per-HydroBasins-group NHN reads) — this function
+#' itself has no opinion on where lakes_sf came from or how it was
+#' resolved.
+#'
+#' @param catchments_sf   sf object with a site_id column, one row per site,
+#'   already st_make_valid()'d
+#' @param lakes_sf        sf object with OGF_ID, OFFICIAL_N, and
+#'   waterbody_type_col columns, already in catchments_sf's CRS
+#' @param min_lake_area_ha         Numeric. Default 1.
+#' @param exclude_waterbody_types  Character vector. Default c("River", "Pond").
+#' @param partial_band             Numeric length-2. Default c(2, 98).
+#' @param waterbody_type_col       Character. Name of the column in
+#'   lakes_sf holding waterbody type, used against
+#'   exclude_waterbody_types. Default "WATERBODY_" (OHN's own field name;
+#'   CELESTE's NHN-derived lakes_sf renames "waterDefinitionText" to this
+#'   before calling, so this worker never needs to know the source schema).
+#'
+#' @return A long tibble (site_id, OGF_ID, lake_name, lake_area_ha,
+#'   pct_lake_outside), one row per flagged (site, lake) pair. Empty
+#'   (0-row, correctly typed) if nothing is flagged.
+flag_catchment_lake_pairs <- function(
+  catchments_sf, lakes_sf, min_lake_area_ha = 1,
+  exclude_waterbody_types = c("River", "Pond"), partial_band = c(2, 98),
+  waterbody_type_col = "WATERBODY_"
+) {
+  empty <- tibble::tibble(
+    site_id = character(0), OGF_ID = character(0), lake_name = character(0),
+    lake_area_ha = numeric(0), pct_lake_outside = numeric(0)
+  )
+  if (nrow(catchments_sf) == 0 || nrow(lakes_sf) == 0) {
+    return(empty)
+  }
+
+  results <- purrr::map(seq_len(nrow(catchments_sf)), function(i) {
+    sid <- catchments_sf$site_id[i]
+    cat_geom <- catchments_sf[i, ]
+    hits <- sf::st_intersects(lakes_sf, cat_geom, sparse = FALSE)[, 1]
+    if (sum(hits) == 0) {
+      return(NULL)
+    }
+    cand <- lakes_sf[hits, ]
+    purrr::map(seq_len(nrow(cand)), function(j) {
+      lake_row <- cand[j, ]
+      lake_area_ha <- as.numeric(sf::st_area(lake_row)) / 1e4
+      if (lake_area_ha < min_lake_area_ha) {
+        return(NULL)
+      }
+      type_val <- lake_row[[waterbody_type_col]]
+      if (!is.na(type_val) && type_val %in% exclude_waterbody_types) {
+        return(NULL)
+      }
+      pct_outside <- tryCatch(
+        lake_containment_pct(lake_row, cat_geom),
+        error = function(e) NA_real_
+      )
+      if (is.na(pct_outside) || pct_outside <= partial_band[1] || pct_outside >= partial_band[2]) {
+        return(NULL)
+      }
+      tibble::tibble(
+        site_id = sid, OGF_ID = as.character(lake_row$OGF_ID), lake_name = lake_row$OFFICIAL_N,
+        lake_area_ha = lake_area_ha, pct_lake_outside = pct_outside
+      )
+    }) |>
+      purrr::compact() |>
+      dplyr::bind_rows()
+  }) |>
+    purrr::compact() |>
+    dplyr::bind_rows()
+
+  if (nrow(results) == 0) {
+    return(empty)
+  }
+  dplyr::arrange(results, dplyr::desc(lake_area_ha))
+}
+
+#' Validate lake containment per group, for projects with no single
+#' project-wide lake source
+#'
+#' CELESTE's case: NHN waterbodies are only available per HydroBasins
+#' group (read from local GDBs relevant to that group's AOI), unlike CAM's
+#' single province-wide OHN file — so there's no one `lakes_path` to hand
+#' validate_catchment_lake_intersections(). This loops sites$group_id,
+#' resolving each group's lakes via a caller-supplied closure, and unions
+#' the results.
+#'
+#' @param sites          tibble with site_id, group_id columns
+#' @param output_dir     Character. Root output directory
+#' @param fetch_lakes_fn Function(group_catchments_sf, group_id) -> sf
+#'   object with OGF_ID/OFFICIAL_N/<waterbody_type_col> columns, already in
+#'   group_catchments_sf's CRS, or NULL/0-row if none found. A
+#'   project-specific closure — e.g. CELESTE's fetch_nhn_lakes_for_group()
+#'   in workflow/CELESTE/fix_lake_bisection.R.
+#' @param catchment_file           Character. Default "catchment.gpkg".
+#' @param min_lake_area_ha         Numeric. Default 1.
+#' @param exclude_waterbody_types  Character vector. Default c("River",
+#'   "Pond") — override per source (e.g. CELESTE passes c("Watercourse")).
+#' @param partial_band             Numeric length-2. Default c(2, 98).
+#' @param waterbody_type_col       Character. Default "WATERBODY_" —
+#'   override to match fetch_lakes_fn's actual column name if it isn't
+#'   normalized to "WATERBODY_" already.
+#'
+#' @return Same shape as validate_catchment_lake_intersections(), unioned
+#'   across every group in sites$group_id. Writes the same
+#'   lake_intersection_report.csv.
+validate_catchment_lake_intersections_by_group <- function(
+  sites, output_dir, fetch_lakes_fn, catchment_file = "catchment.gpkg",
+  min_lake_area_ha = 1, exclude_waterbody_types = c("River", "Pond"),
+  partial_band = c(2, 98), waterbody_type_col = "WATERBODY_"
+) {
+  all_results <- purrr::map(sort(unique(sites$group_id)), function(grp) {
+    grp_sites <- dplyr::filter(sites, group_id == grp)
+
+    catchments <- purrr::map(grp_sites$site_id, function(sid) {
+      p <- fs::path(site_output_dir(output_dir, sid), catchment_file)
+      if (!cache_exists(p)) {
+        return(NULL)
+      }
+      x <- sf::st_read(p, quiet = TRUE)
+      x$site_id <- sid
+      x[, "site_id"]
+    }) |>
+      purrr::compact() |>
+      dplyr::bind_rows()
+
+    if (nrow(catchments) == 0) {
+      cw_warn(glue::glue("Group '{grp}': no {catchment_file} files found — skipping."))
+      return(NULL)
+    }
+    catchments <- sf::st_make_valid(catchments)
+
+    lakes <- tryCatch(
+      fetch_lakes_fn(catchments, grp),
+      error = function(e) {
+        cw_warn(glue::glue("Group '{grp}': fetch_lakes_fn() failed — {e$message}"))
+        NULL
+      }
+    )
+    if (is.null(lakes) || nrow(lakes) == 0) {
+      cw_warn(glue::glue("Group '{grp}': no lakes found — skipping."))
+      return(NULL)
+    }
+
+    cw_inform(glue::glue(
+      "Group '{grp}': {nrow(catchments)} site(s), {nrow(lakes)} candidate lake(s)."
+    ))
+    flag_catchment_lake_pairs(
+      catchments, lakes, min_lake_area_ha, exclude_waterbody_types,
+      partial_band, waterbody_type_col
+    )
+  }) |>
+    purrr::compact() |>
+    dplyr::bind_rows()
+
+  if (nrow(all_results) == 0) {
+    all_results <- tibble::tibble(
+      site_id = character(0), OGF_ID = character(0), lake_name = character(0),
+      lake_area_ha = numeric(0), pct_lake_outside = numeric(0)
+    )
+  }
+
+  report_path <- fs::path(output_dir, "lake_intersection_report.csv")
+  readr::write_csv(all_results, report_path)
+
+  n_groups_affected <- dplyr::n_distinct(
+    sites$group_id[sites$site_id %in% all_results$site_id]
+  )
+  cw_inform(glue::glue(
+    "Lake intersection check: {nrow(all_results)} bisected (site, lake) pair(s) ",
+    "across {dplyr::n_distinct(all_results$site_id)} site(s), ",
+    "{n_groups_affected} group(s). Report written to {report_path}."
+  ))
+  if (nrow(all_results) > 0) {
+    print(all_results, n = 100)
+  }
+
+  all_results
 }
 
 #' Build a lake-flattened, fill-and-D8-corrected flow pointer for a
@@ -303,8 +449,19 @@ validate_catchment_lake_intersections <- function(
 #' deleting the directory would just discard the accumulated history and
 #' reintroduce the bug above.
 #'
-#' @param cache_dir     Character. Project cache directory (must contain
-#'   dem.tif, already cropped/reprojected by the engine's terrain prep)
+#' Prefers cache_dir/dem_burned.tif over cache_dir/dem.tif when present —
+#' a group whose raw-DEM terrain tier burns NHN streams in before breaching
+#' (engine/02_prepare_terrain.R's prepare_raw_dem_tier(), CELESTE's normal
+#' path for 5 of its 6 HydroBasins groups) needs lake-flattening applied on
+#' top of that already-burned surface, not the pre-burn DEM — otherwise the
+#' corrected pointer would silently discard the stream-burn-in correction
+#' for the group. CAM streams never produces a dem_burned.tif (its
+#' flow_direction tier has no burn step), so this is a no-op there — always
+#' falls through to dem.tif, unchanged behavior.
+#'
+#' @param cache_dir     Character. Project or group cache directory (must
+#'   contain dem_burned.tif and/or dem.tif, already cropped/reprojected by
+#'   the engine's terrain prep)
 #' @param lake_polys    sf object with an OGF_ID column. The lake polygon(s)
 #'   to flatten (typically just the ones flagged by
 #'   validate_catchment_lake_intersections()) — merged with, not replacing,
@@ -314,9 +471,15 @@ validate_catchment_lake_intersections <- function(
 #'
 #' @return Character. Path to the corrected flow_pointer.tif.
 prepare_lake_corrected_flow_pointer <- function(cache_dir, lake_polys, output_subdir = "lake_corrected") {
-  dem_path <- fs::path(cache_dir, "dem.tif")
+  dem_path <- fs::path(cache_dir, "dem_burned.tif")
   if (!cache_exists(dem_path)) {
-    cw_abort(glue::glue("prepare_lake_corrected_flow_pointer(): {dem_path} not found."))
+    dem_path <- fs::path(cache_dir, "dem.tif")
+  }
+  if (!cache_exists(dem_path)) {
+    cw_abort(glue::glue(
+      "prepare_lake_corrected_flow_pointer(): neither dem_burned.tif nor ",
+      "dem.tif found in {cache_dir}."
+    ))
   }
 
   out_dir <- fs::path(cache_dir, output_subdir)
