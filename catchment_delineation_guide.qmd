@@ -64,14 +64,17 @@ library(patchwork)
 # alongside each stage (grey, non-executed blocks) is reference — copy it into
 # an R session if you actually need to run that step.
 #
-# NOTE: the stream worked example below reads output/CELESTE/ — CELESTE's
-# pre-engine run, kept on disk deliberately (not deleted; see git history for
-# the retired non-modular run_celeste.R that produced it). The CURRENT
-# run_celeste.R runs on the modular engine and writes to
-# output/CELESTE_engine/ instead. The pipeline SHAPE shown below (group
-# manifest -> terrain -> delineate -> hydroweight) is unchanged either way;
-# only the file paths differ if you want to point this guide at a fresh
-# engine run instead.
+# NOTE: the stream worked example below reads output/CELESTE/ and
+# cache/CELESTE/NBE/ — the current, engine-based run_celeste.R's own output
+# (through 2026-08-30, CELESTE ran on a modular engine but wrote to
+# output/CELESTE_engine/ + cache/CELESTE_engine/, kept physically separate
+# from a still-on-disk pre-engine run's own output/CELESTE + cache/CELESTE +
+# cache/NBE; the 2026-08-31 output/cache consolidation retired that old
+# pre-engine data for real and renamed CELESTE_engine -> CELESTE once
+# nothing else depended on the old copy — see git history around that date,
+# including workflow/R/engine/03_prepare_streams_burn.R's flowlines.gpkg
+# persistence fix + workflow/CELESTE/backfill_streams_gpkg_nbe.R, both
+# needed so NBE's engine output had every file this guide reads).
 #
 # autodep = TRUE lets chunk caching (execute: cache: true, above) correctly
 # invalidate a cached chunk when an *upstream* chunk it reads variables from
@@ -159,7 +162,7 @@ Two pipelines currently run on it, sharing most of their machinery but differing
 
 ### Two-tier processing: groups and sites
 
-Expensive DEM conditioning (breach depressions, flow direction, flow accumulation) is run once per **group** — a hydrologically coherent region sharing a DEM — never once per site. A **site** is a single pour point (or lake); several sites sharing a `group_id` reuse the same conditioned DEM and flow-accumulation raster. In the stream pipeline, `NBE` is one such group: all 8 NBE sites share `cache/NBE/dem.tif`, `flow_pointer.tif`, and `flow_accum.tif`.
+Expensive DEM conditioning (breach depressions, flow direction, flow accumulation) is run once per **group** — a hydrologically coherent region sharing a DEM — never once per site. A **site** is a single pour point (or lake); several sites sharing a `group_id` reuse the same conditioned DEM and flow-accumulation raster. In the stream pipeline, `NBE` is one such group: all 8 NBE sites share `cache/CELESTE/NBE/dem.tif`, `flow_pointer.tif`, and `flow_accum.tif`.
 
 ::: {.columns}
 
@@ -269,7 +272,7 @@ Anything specific to one pipeline — the runner and its LOI `prepare_*.R` scrip
 
 # Worked example A — Stream delineation (`NBE` group)
 
-`NBE1`–`NBE8` are 8 New Brunswick pour points sharing `group_id = "NBE"`. Every figure in this section reads directly from `cache/NBE/` and `output/CELESTE/NBE*/` — files already produced by CELESTE's retained pre-engine run (see the note at the top of this document; the current `run_celeste.R` is engine-based and writes to `output/CELESTE_engine/` instead — the pipeline shape below is unchanged either way).
+`NBE1`–`NBE8` are 8 New Brunswick pour points sharing `group_id = "NBE"`. Every figure in this section reads directly from `cache/CELESTE/NBE/` and `output/CELESTE/NBE*/` — files already produced by the current, engine-based `run_celeste.R` (see the note at the top of this document for how this section's paths changed on 2026-08-31).
 
 ## Stage 1 — Group manifest
 
@@ -340,13 +343,13 @@ Always inspect group AOIs (`cache/group_aois.gpkg`) before Stage 2. A group AOI 
 
 ## Stage 2 — Prepare DEM
 
-The MRDEM is a GDAL VRT streamed from cloud tiles — `prepare_dem()` crops it to each group AOI and writes `cache/<group_id>/dem.tif`, a rectangular crop (never masked to the AOI polygon — masking would introduce NoData at the boundary that WhiteboxTools reads as depressions, corrupting flow direction near the edge). `cache/NBE/dem.tif` itself is ~100M cells (the full group AOI shown in the Stage 1 inset); the figure below crops it down to the example catchment's extent for display.
+The MRDEM is a GDAL VRT streamed from cloud tiles — `prepare_dem()` crops it to each group AOI and writes `cache/<group_id>/dem.tif`, a rectangular crop (never masked to the AOI polygon — masking would introduce NoData at the boundary that WhiteboxTools reads as depressions, corrupting flow direction near the edge). `cache/CELESTE/NBE/dem.tif` itself is ~100M cells (the full group AOI shown in the Stage 1 inset); the figure below crops it down to the example catchment's extent for display.
 
 ```{r}
 #| label: nbe-dem
 #| fig-cap: "Group DEM cropped to the NBE1 catchment extent, for display — prepare_dem() itself crops to the full group AOI, not this window."
 dem_window   <- st_buffer(st_as_sfc(st_bbox(nbe1_catchment)), 1500)
-nbe_dem_win  <- rast("cache/NBE/dem.tif") |> terra::crop(vect(dem_window))
+nbe_dem_win  <- rast("cache/CELESTE/NBE/dem.tif") |> terra::crop(vect(dem_window))
 nbe_hill_win <- terra::shade(
   terra::terrain(nbe_dem_win, "slope", unit = "radians"),
   terra::terrain(nbe_dem_win, "aspect", unit = "radians")
@@ -373,8 +376,8 @@ When `burn_streams = TRUE` for a group, NHN flowlines are merged (fixing two kno
 window    <- st_buffer(st_as_sfc(st_bbox(nbe1_catchment)), 2000)
 window_bb <- st_bbox(window)
 
-flowlines_win   <- st_read("cache/NBE/flowlines.gpkg", quiet = TRUE, wkt_filter = st_as_text(window))
-waterbodies_win <- st_read("cache/NBE/waterbodies.gpkg", quiet = TRUE, wkt_filter = st_as_text(window))
+flowlines_win   <- st_read("cache/CELESTE/NBE/flowlines.gpkg", quiet = TRUE, wkt_filter = st_as_text(window))
+waterbodies_win <- st_read("cache/CELESTE/NBE/waterbodies.gpkg", quiet = TRUE, wkt_filter = st_as_text(window))
 
 # wkt_filter keeps any feature that *intersects* the window, not just the
 # part of it inside the window — a flowline crossing the edge can extend far
