@@ -4,16 +4,11 @@
 # on the modular, input-driven engine (workflow/R/engine/) rather than
 # either of the two existing project-specific pipelines.
 #
-# WHY THIS ISN'T ON workflow/R/stream/ (CELESTE's pipeline) OR
-# workflow/R/lake/ (CAM lakes' pipeline):
-#   These 39 sites are stream sampling locations near (but not matching)
-#   the 45 CAM lake sites, plus a separate set of MOE long-term monitoring
-#   gauges — delineated as POINT pour points (Jenson snap), like CELESTE,
-#   but against the SAME OIH DEM/flow-direction CAM lakes uses (EPSG:3161),
-#   not MRDEM (EPSG:3979) — a combination neither existing pipeline
-#   supports directly. See workflow/R/engine/ for the general mechanism;
-#   see /Users/sam/.claude/plans/i-need-to-run-golden-nova.md for the full
-#   design writeup.
+# See workflow/CAM/README.md for the full rationale behind every
+# CAM-streams-specific decision below (why this needed the shared engine
+# rather than an existing pipeline, the SUD11 exclusion, lake-bisection
+# handling, the NDVI source supersession, and the path_lazy/path_template
+# LOI choice) and for how to reproduce this run from scratch.
 #
 # WORKFLOW STAGES:
 #   Stage 1 — Resolve config, build group manifest (single "whole_domain"
@@ -76,10 +71,8 @@
 #          output_dir = output_dir, cache_dir = cache_dir, loi_layers = loi_layers
 #        )
 #
-# DATA QUALITY FLAG:
-#   Source xlsx row 30, SUD11, has lon = -51.2 — 2500+ km off from its
-#   neighbors (SUD12/VER01, both ~-81.0), almost certainly a typo. Excluded
-#   below via EXCLUDED_SITE_IDS; verify against source before re-including.
+# DATA QUALITY FLAG: SUD11 is excluded (EXCLUDED_SITE_IDS below) — see
+# README.md's "Site list and the SUD11 exclusion" note.
 # =============================================================================
 
 # -- Packages ------------------------------------------------------------------
@@ -112,9 +105,10 @@ source(here("workflow/R/engine/04_delineate_site.R"))
 source(here("code/reset_workflow.R")) # reset_site() — used by rerun_engine_sites()'s resnap path
 source(here("workflow/R/engine/99_rerun_sites")) # rerun_engine_site_watershed(), rerun_engine_sites() — see "RERUNNING AFTER A CORRECTION" above
 source(here("workflow/gee_utils.R")) # prepare_polygons_for_gee()/group_polygons_by_adjacency() — used by prepare_ndvi.R to re-derive the site->NDVI-file mapping
-source(here("workflow/raster_attributes.R")) # sens_slope_trend() — used by prepare_ndvi_trend.R
+source(here("workflow/raster_attributes.R")) # sens_slope_trend() — used by prepare_ndvi_trend.R; mask_out_waterbodies() — used by prepare_ndvi_masked.R
 source(here("workflow/CAM/prepare_ndvi.R")) # build_cam_ndvi_site_map(), clean_cam_ndvi_tile(), prepare_cam_ndvi_site_rasters() — CAM stream-site NDVI LOI prep (see Stage 7)
 source(here("workflow/CAM/prepare_ndvi_trend.R")) # prepare_cam_ndvi_trend_site_rasters() — Sen's-slope NDVI trend LOI prep
+source(here("workflow/CAM/prepare_ndvi_masked.R")) # lake-masked "ndvi_masked"/"ndvi_trend_masked" LOIs, alongside (not in place of) the above
 source(here("workflow/CAM/prepare_harvest_regen.R")) # prepare_cam_harvest_regen_rasters() — Ontario MNR harvest/regen LOI prep
 # If a future CAM-streams-like project needs HydroBasins-based grouping
 # (grouping$strategy = "hydrobasins" — a large national-mosaic DEM worth
@@ -295,42 +289,12 @@ print(metrics)
 # =============================================================================
 # STAGE 7 (optional) — Distance-weighted catchment attributes (hydroweight)
 # =============================================================================
-# Reuses CAM's existing project-wide LOI rasters (from run_cam_lakes.R), but
-# as `path_lazy` rather than `path` entries — deliberately, not just for
-# consistency. With `path`, calculate_hydroweight_attributes_stream()
-# prepares ONE shared SpatRaster per LOI up front and reuses that SAME
-# object across every site x version job (76 here: 38 sites x 2 versions);
-# each job's crop()/mask() then operates on the FULL project-wide extent
-# every time before narrowing down to one catchment. Confirmed in practice
-# to eventually crash with a terra "[readStart] file does not exist"
-# error partway through a run (a temp-file GC race — the shared object
-# survives many iterations of heavy repeated crop/mask churn on the full
-# extent, which is exactly the failure mode that class of terra bug needs).
-# `path_lazy` avoids this structurally, not just by luck: each site's LOI
-# is pre-cropped down to just its own catchment ONCE, cached to a real
-# permanent per-site file (hydroweight_loi/<loi>/<site_id>_reprojected.tif),
-# *before* run_loi_attributes_stream() ever touches it — so there's far
-# less data movement per job, and no long-lived shared object at all.
-# CELESTE already uses `path_lazy` for its own LOIs without issue.
-#
-# NDVI (the "ndvi" entry below): SUPERSEDED 2026-08-26. Originally wired to
-# /Users/sam/Downloads/NDVI_CAM_sites_BAP.tif, a raster built for the LAKE-
-# site locations — that source genuinely doesn't cover SUD22 (~8 km outside
-# its extent), so those columns read NA under it. But that's a bad reason
-# to leave SUD22 uncovered: workflow/CAM/prepare_ndvi.R's
-# prepare_cam_ndvi_site_rasters() already builds a properly stream-
-# catchment-matched CONTINUOUS NDVI layer from the SAME per-catchment/group
-# Google Earth Engine exports (data/ndvi/CAM/*.tif) that "ndvi_trend" below
-# uses — confirmed directly that SUD22 maps to
-# Landsat_NDVI_1984_2025_cam_sud17.tif (shared with SUD17) with full
-# coverage. "ndvi" now uses that source instead of the lake-site raster —
-# real coverage for every site "ndvi_trend" covers, SUD22 included.
-#
-# "ndvi_trend" is the SEPARATE Sen's-slope trend computed from the same
-# export data (workflow/CAM/prepare_ndvi_trend.R, mirroring
-# workflow/CELESTE/prepare_ndvi_trend.R) — kept alongside "ndvi" since the
-# two answer different questions (a static mean/distribution vs. a
-# directional trend), not because "ndvi" needed a different source.
+# LOI rasters use `path_lazy`/`path_template`, not `path` — deliberately,
+# not just for consistency with CELESTE. See README.md's "LOI layers use
+# path_lazy/path_template" note for why (a real terra crash `path` hit in
+# practice) and its "NDVI: superseded source" note for why "ndvi" reads
+# from the per-catchment GEE exports rather than the original lake-site
+# NDVI raster.
 
 CANLCC_PATH <- "/Users/sam/Documents/cfs/shared_data/raw/landcover/CAN_LLC_2020.tif"
 
@@ -356,6 +320,11 @@ prepare_cam_ndvi_site_rasters(sites, output_dir = output_dir, cache_dir = cache_
 # SUD17+SUD22, the NCMN cluster, ILD02).
 prepare_cam_ndvi_trend_site_rasters(sites, output_dir = output_dir, cache_dir = cache_dir)
 
+# Lake-masked "ndvi_masked"/"ndvi_trend_masked" LOIs, alongside (not in
+# place of) the two calls above — see prepare_ndvi_masked.R's header.
+prepare_cam_ndvi_masked_site_rasters(sites, output_dir = output_dir, cache_dir = cache_dir)
+prepare_cam_ndvi_trend_masked_site_rasters(sites, output_dir = output_dir, cache_dir = cache_dir)
+
 # One-time (single whole-domain group), cached to disk thereafter. Ontario
 # MNR harvest/regen — real (not bbox-only) coverage over CAM's AOI
 # confirmed before writing this; see prepare_harvest_regen.R's header.
@@ -371,6 +340,15 @@ loi_layers <- list(
     path_template = fs::path(cache_dir, "hydroweight_loi", "ndvi_trend", "{site_id}.tif"),
     name = "ndvi_trend", type = "continuous",
     stats = c("distwtd_mean", "distwtd_sd", "mean", "sd", "median", "min", "max") # sum/cell_count meaningless for a trend, same exclusions CELESTE's ndvi_trend LOI uses
+  ),
+  list(
+    path_template = fs::path(cache_dir, "hydroweight_loi", "ndvi_masked", "{site_id}.tif"),
+    name = "ndvi_masked", type = "continuous"
+  ),
+  list(
+    path_template = fs::path(cache_dir, "hydroweight_loi", "ndvi_trend_masked", "{site_id}.tif"),
+    name = "ndvi_trend_masked", type = "continuous",
+    stats = c("distwtd_mean", "distwtd_sd", "mean", "sd", "median", "min", "max")
   ),
   list(
     path_lazy = fs::path(cache_dir, "hydroweight_loi", "harvest_regen", "{group_id}.tif"),

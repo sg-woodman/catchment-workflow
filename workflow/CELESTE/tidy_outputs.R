@@ -1,15 +1,29 @@
 # tidy_outputs.R
 # =============================================================================
-# Reshapes CELESTE_engine_hydroweight.csv (wide, one row per site x version)
+# Reshapes CELESTE_hydroweight.csv (wide, one row per site x version)
 # into purpose-shaped long tables for plotting/analysis — one file per LOI,
 # real stat columns (mean/sd/prop), not a generic melted stat/value pair.
 # Same design as workflow/CAM/tidy_outputs.R (see that file's header for the
 # full rationale — unweighted + distance-weighted stats merge into one
 # column pair per scheme, scheme stays a filterable row, record-spanning
 # values get their own no-year summary table rather than a fake NA year).
-# CELESTE has no "canlcc" LOI (that's CAM-only), so this script covers
-# exactly 4 output tables: ndvi_timeseries, ndvi_trend_summary,
-# harvest_regen_timeseries, harvest_regen_combined_summary.
+# This script covers 7 output tables: canlcc_long, ndvi_timeseries,
+# ndvi_trend_summary, ndvi_masked_timeseries, ndvi_trend_masked_summary,
+# harvest_regen_timeseries, harvest_regen_combined_summary. canlcc uses
+# the identical CAN_LLC_2020.tif source and class scheme as both CAM
+# projects (see run_celeste.R's loi_layers), so tidy_hydroweight_canlcc()
+# below is unchanged from workflow/CAM/tidy_outputs.R's version — same raw
+# column format (canlcc_<class>_<scheme>_prop).
+#
+# "ndvi_masked"/"ndvi_trend_masked" are the lake-masked counterparts of
+# "ndvi"/"ndvi_trend" (see workflow/CELESTE/prepare_ndvi_masked.R) — same
+# raw column shape as their unmasked counterpart, just with a
+# "ndvi_masked_"/"ndvi_trend_masked_" prefix instead of "ndvi_"/
+# "ndvi_trend_". REGEX CARE: "ndvi_trend_masked_..." columns also start
+# with the literal string "ndvi_trend_", so tidy_hydroweight_ndvi_trend_
+# summary()'s own pattern explicitly excludes anything continuing with
+# "masked_" — otherwise every masked column would double-count into BOTH
+# tables.
 #
 # ONE REAL DIFFERENCE FROM CAM'S ndvi COLUMNS — confirmed by inspection, not
 # assumed: CELESTE's raw NDVI columns are "ndvi_ndvi_mosaic_<N>_<stat>"
@@ -23,13 +37,14 @@
 # "0_NDVI_1984", band 42 = "41_NDVI_2025" — sequential, no gaps, no
 # reordering. So year = 1983 + N for CELESTE's ndvi_mosaic_N.
 #
-# Usage (from an R session, after CELESTE_engine_hydroweight.csv already
+# Usage (from an R session, after CELESTE_hydroweight.csv already
 # exists — i.e. after run_celeste.R has been run):
 #   source(here("workflow/R/utils.R"))
 #   source(here("workflow/CELESTE/tidy_outputs.R"))
-#   tidy_celeste_outputs(output_dir = here("output/CELESTE_engine"))
-# Writes 4 CSVs into output_dir/tidy/: ndvi_timeseries.csv,
-# ndvi_trend_summary.csv, harvest_regen_timeseries.csv,
+#   tidy_celeste_outputs(output_dir = here("output/CELESTE"))
+# Writes 7 CSVs into output_dir/tidy/: canlcc_long.csv, ndvi_timeseries.csv,
+# ndvi_trend_summary.csv, ndvi_masked_timeseries.csv,
+# ndvi_trend_masked_summary.csv, harvest_regen_timeseries.csv,
 # harvest_regen_combined_summary.csv.
 #
 # Dependencies: dplyr, tidyr, readr, fs, glue, tibble, purrr (via utils.R);
@@ -53,6 +68,36 @@ normalize_scheme <- function(x) {
     ))
   }
   HYDROWEIGHT_SCHEMES[idx]
+}
+
+#' Tidy the "canlcc" (land cover) block into a composition-ready long
+#' table — column shape identical to CAM's, see workflow/CAM/
+#' tidy_outputs.R's version for the full docstring. `year` is fixed at
+#' `year` (default 2020L, matching CAN_LLC_2020.tif) for every row.
+#'
+#' @param hw   Full hydroweight data frame.
+#' @param year Integer. Fixed year for every row. Default 2020L.
+#' @return Long tibble: site, version, year, class, scheme, prop.
+tidy_hydroweight_canlcc <- function(hw, year = 2020L) {
+  cols <- grep("^canlcc_", names(hw), value = TRUE)
+  if (length(cols) == 0) {
+    return(tibble::tibble(
+      site = character(), version = character(), year = integer(),
+      class = character(), scheme = character(), prop = double()
+    ))
+  }
+
+  hw |>
+    dplyr::select(site, version, dplyr::all_of(cols)) |>
+    tidyr::pivot_longer(
+      cols = dplyr::all_of(cols),
+      names_to = c("class", "scheme"),
+      names_pattern = "^canlcc_(.+)_(lumped|ieuco|iflo|haiflo|ieucs|ifls|haifls)_prop$",
+      values_to = "prop"
+    ) |>
+    dplyr::mutate(year = as.integer(year), scheme = normalize_scheme(scheme)) |>
+    dplyr::select(site, version, year, class, scheme, prop) |>
+    dplyr::arrange(site, version, class, scheme)
 }
 
 #' Tidy the "ndvi" (continuous, per-year) block into a year x scheme time
@@ -110,8 +155,12 @@ tidy_hydroweight_ndvi_timeseries <- function(hw) {
 #' Tidy the "ndvi_trend" (Sen's-slope trend) block into one row per
 #' (site, version, scheme) — column shape identical to CAM's, see
 #' workflow/CAM/tidy_outputs.R's version for the full docstring.
+#'
+#' Excludes "ndvi_trend_masked_..." columns explicitly (they also start
+#' with the literal "ndvi_trend_" prefix) — those belong to
+#' tidy_hydroweight_ndvi_trend_masked() instead.
 tidy_hydroweight_ndvi_trend_summary <- function(hw) {
-  cols <- grep("^ndvi_trend_", names(hw), value = TRUE)
+  cols <- grep("^ndvi_trend_(?!masked_)", names(hw), value = TRUE, perl = TRUE)
   empty_cols <- c(
     "slope_mean", "slope_sd", "slope_median", "slope_min", "slope_max",
     "p_value_mean", "p_value_sd", "p_value_median", "p_value_min", "p_value_max"
@@ -128,6 +177,94 @@ tidy_hydroweight_ndvi_trend_summary <- function(hw) {
       cols = dplyr::all_of(cols),
       names_to = "rest",
       names_pattern = "^ndvi_trend_(.+)$",
+      values_to = "raw_value"
+    ) |>
+    dplyr::mutate(
+      variable = dplyr::if_else(startsWith(rest, "slope_"), "slope", "p_value"),
+      rest2 = sub("^(slope|p_value)_", "", rest),
+      is_distwtd = grepl("distwtd", rest2),
+      scheme = normalize_scheme(dplyr::if_else(
+        is_distwtd, sub("_distwtd_(mean|sd)$", "", rest2), "lumped"
+      )),
+      flat_stat = dplyr::if_else(
+        is_distwtd, sub(".*_distwtd_(mean|sd)$", "\\1", rest2), rest2
+      ),
+      col_name = paste0(variable, "_", flat_stat)
+    )
+
+  long |>
+    dplyr::select(site, version, scheme, col_name, raw_value) |>
+    tidyr::pivot_wider(names_from = col_name, values_from = raw_value) |>
+    dplyr::select(site, version, scheme, dplyr::all_of(empty_cols)) |>
+    dplyr::arrange(site, version, scheme)
+}
+
+#' Tidy the "ndvi_masked" (lake-masked continuous, per-year) block —
+#' identical shape/logic to tidy_hydroweight_ndvi_timeseries(), just
+#' reading "ndvi_masked_ndvi_mosaic_<band>_<stat>" columns instead of
+#' "ndvi_ndvi_mosaic_<band>_<stat>". See workflow/CELESTE/prepare_ndvi_
+#' masked.R for how this LOI is built.
+#'
+#' @param hw Full hydroweight data frame.
+#' @return Long tibble: site, version, year, scheme, mean, sd, median, min,
+#'   max, sum, cell_count, na_cell_count.
+tidy_hydroweight_ndvi_masked_timeseries <- function(hw) {
+  cols <- grep("^ndvi_masked_ndvi_mosaic_[0-9]+_", names(hw), value = TRUE)
+  empty_cols <- c("mean", "sd", "median", "min", "max", "sum", "cell_count", "na_cell_count")
+  if (length(cols) == 0) {
+    empty <- tibble::tibble(site = character(), version = character(), year = integer(), scheme = character())
+    for (nm in empty_cols) empty[[nm]] <- double()
+    return(empty)
+  }
+
+  long <- hw |>
+    dplyr::select(site, version, dplyr::all_of(cols)) |>
+    tidyr::pivot_longer(
+      cols = dplyr::all_of(cols),
+      names_to = c("band", "scheme_stat"),
+      names_pattern = "^ndvi_masked_ndvi_mosaic_([0-9]+)_(.+)$",
+      values_to = "raw_value"
+    ) |>
+    dplyr::mutate(
+      year = 1983L + as.integer(band),
+      is_distwtd = grepl("distwtd", scheme_stat),
+      scheme = normalize_scheme(dplyr::if_else(
+        is_distwtd, sub("_distwtd_(mean|sd)$", "", scheme_stat), "lumped"
+      )),
+      flat_stat = dplyr::if_else(
+        is_distwtd, sub(".*_distwtd_(mean|sd)$", "\\1", scheme_stat), tolower(scheme_stat)
+      )
+    )
+
+  long |>
+    dplyr::select(site, version, year, scheme, flat_stat, raw_value) |>
+    tidyr::pivot_wider(names_from = flat_stat, values_from = raw_value) |>
+    dplyr::select(site, version, year, scheme, dplyr::any_of(empty_cols)) |>
+    dplyr::arrange(site, version, year, scheme)
+}
+
+#' Tidy the "ndvi_trend_masked" (lake-masked Sen's-slope trend) block —
+#' identical shape/logic to tidy_hydroweight_ndvi_trend_summary(), just
+#' reading "ndvi_trend_masked_..." columns. See workflow/CELESTE/
+#' prepare_ndvi_masked.R for how this LOI is built.
+tidy_hydroweight_ndvi_trend_masked_summary <- function(hw) {
+  cols <- grep("^ndvi_trend_masked_", names(hw), value = TRUE)
+  empty_cols <- c(
+    "slope_mean", "slope_sd", "slope_median", "slope_min", "slope_max",
+    "p_value_mean", "p_value_sd", "p_value_median", "p_value_min", "p_value_max"
+  )
+  if (length(cols) == 0) {
+    empty <- tibble::tibble(site = character(), version = character(), scheme = character())
+    for (nm in empty_cols) empty[[nm]] <- double()
+    return(empty)
+  }
+
+  long <- hw |>
+    dplyr::select(site, version, dplyr::all_of(cols)) |>
+    tidyr::pivot_longer(
+      cols = dplyr::all_of(cols),
+      names_to = "rest",
+      names_pattern = "^ndvi_trend_masked_(.+)$",
       values_to = "raw_value"
     ) |>
     dplyr::mutate(
@@ -195,22 +332,25 @@ tidy_hydroweight_harvest_regen_combined_summary <- function(hw) {
 
 # -- Orchestrator -------------------------------------------------------------
 
-#' Read CELESTE_engine_hydroweight.csv from output_dir, tidy it into 4
+#' Read CELESTE_hydroweight.csv from output_dir, tidy it into 7
 #' purpose-shaped long tables, and write the results to output_dir/tidy/
 #'
 #' Warns (does not abort) if any column besides site/version wasn't claimed
-#' by one of the 3 known LOI prefixes (ndvi, ndvi_trend, harvest_regen) — a
-#' safety net for a future LOI added to loi_layers without a matching
+#' by one of the 6 known LOI prefixes (canlcc, ndvi, ndvi_trend,
+#' ndvi_masked, ndvi_trend_masked, harvest_regen) — a safety net for a
+#' future LOI added to loi_layers without a matching
 #' tidy_hydroweight_<loi>() here.
 #'
 #' @param output_dir      Character. Directory containing
-#'   CELESTE_engine_hydroweight.csv (e.g. here("output/CELESTE_engine")).
+#'   CELESTE_hydroweight.csv (e.g. here("output/CELESTE")).
+#' @param canlcc_year     Integer. Passed to tidy_hydroweight_canlcc().
+#'   Default 2020L.
 #' @param hydroweight_file Character. Filename within output_dir. Default
 #'   matches run_celeste.R's actual output name.
 #'
-#' @return Invisibly, a named list of the 4 tidy tibbles, already written
+#' @return Invisibly, a named list of the 7 tidy tibbles, already written
 #'   to disk.
-tidy_celeste_outputs <- function(output_dir, hydroweight_file = "CELESTE_engine_hydroweight.csv") {
+tidy_celeste_outputs <- function(output_dir, canlcc_year = 2020L, hydroweight_file = "CELESTE_hydroweight.csv") {
   hydroweight_path <- fs::path(output_dir, hydroweight_file)
   if (!fs::file_exists(hydroweight_path)) {
     cw_abort(glue::glue("tidy_celeste_outputs(): not found: {hydroweight_path}"))
@@ -219,8 +359,11 @@ tidy_celeste_outputs <- function(output_dir, hydroweight_file = "CELESTE_engine_
   hw <- readr::read_csv(hydroweight_path, show_col_types = FALSE)
 
   claimed_cols <- c(
+    grep("^canlcc_", names(hw), value = TRUE),
     grep("^ndvi_ndvi_mosaic_[0-9]+_", names(hw), value = TRUE),
-    grep("^ndvi_trend_", names(hw), value = TRUE),
+    grep("^ndvi_trend_(?!masked_)", names(hw), value = TRUE, perl = TRUE),
+    grep("^ndvi_masked_ndvi_mosaic_[0-9]+_", names(hw), value = TRUE),
+    grep("^ndvi_trend_masked_", names(hw), value = TRUE),
     grep("^harvest_regen_", names(hw), value = TRUE)
   )
   unclaimed <- setdiff(names(hw), c("site", "version", claimed_cols))
@@ -235,8 +378,11 @@ tidy_celeste_outputs <- function(output_dir, hydroweight_file = "CELESTE_engine_
   }
 
   result <- list(
+    canlcc_long = tidy_hydroweight_canlcc(hw, year = canlcc_year),
     ndvi_timeseries = tidy_hydroweight_ndvi_timeseries(hw),
     ndvi_trend_summary = tidy_hydroweight_ndvi_trend_summary(hw),
+    ndvi_masked_timeseries = tidy_hydroweight_ndvi_masked_timeseries(hw),
+    ndvi_trend_masked_summary = tidy_hydroweight_ndvi_trend_masked_summary(hw),
     harvest_regen_timeseries = tidy_hydroweight_harvest_regen_timeseries(hw),
     harvest_regen_combined_summary = tidy_hydroweight_harvest_regen_combined_summary(hw)
   )

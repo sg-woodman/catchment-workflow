@@ -22,7 +22,10 @@
 # raw 0 is Earth Engine's export fill value, not a genuine annual NDVI
 # observation, and treating it as real would corrupt the Theil-Sen slope
 # with false "crashes to zero" instead of correctly excluding that
-# pixel-year via min_obs.
+# pixel-year via min_obs. A separate LAKE-MASKED variant of this LOI
+# ("ndvi_trend_masked") exists alongside this one — see
+# workflow/CAM/prepare_ndvi_masked.R. This file's own output is never
+# masked.
 #
 # COMPUTED ONCE PER FILE, NOT PER SITE: sens_slope_trend()'s cost is
 # ~0.5 ms per VALID pixel (CELESTE's own measured rate — see that

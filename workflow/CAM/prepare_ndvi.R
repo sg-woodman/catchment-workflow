@@ -72,23 +72,27 @@
 #   does — subst(0, NA) then /10000 — since both cases above are
 #   legitimately "no real NDVI reading," not a genuine value of 0.
 #
+# A separate LAKE-MASKED variant of this LOI ("ndvi_masked") exists
+# alongside this one, not in place of it — see
+# workflow/CAM/prepare_ndvi_masked.R. This file's own output is never
+# masked, so it stays a stable, always-available baseline to compare the
+# masked variant against.
+#
 # PRIMARY entry point (for the "ndvi" LOI, if used — see run_cam_streams.R
 # Stage 7's comment on why this isn't wired in by default alongside the
 # new "ndvi_trend" LOI):
 #   prepare_cam_ndvi_site_rasters(sites, output_dir, cache_dir)
 #
 # Usage (from run_cam_streams.R, after sourcing workflow/gee_utils.R for
-# group_polygons_by_adjacency() and workflow/raster_attributes.R is NOT
-# required by this file specifically, but IS required by prepare_ndvi_
-# trend.R which sources this file):
+# group_polygons_by_adjacency()):
 #   source(here("workflow/gee_utils.R"))
 #   source(here("workflow/CAM/prepare_ndvi.R"))
 #   prepare_cam_ndvi_site_rasters(sites, output_dir = output_dir, cache_dir = cache_dir)
 #
 # Dependencies: terra, sf, purrr, fs, glue (via utils.R); workflow/
 #   gee_utils.R's prepare_polygons_for_gee()/group_polygons_by_adjacency()
-#   must be sourced first (used to reconstruct which sites were merged
-#   into which exported group).
+#   must be sourced first (to reconstruct which sites were merged into
+#   which exported group).
 # =============================================================================
 
 # Default location of the CAM stream-site NDVI exports.

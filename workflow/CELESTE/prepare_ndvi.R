@@ -100,7 +100,14 @@
 # NBE now has its own 2 tiles (added after the initial NDVI batch) — no
 # longer a coverage gap.
 #
-# Usage (from run_celeste.R, after sourcing workflow/raster_attributes.R):
+# A separate LAKE-MASKED variant of this LOI ("ndvi_masked") exists
+# alongside this one, not in place of it — see
+# workflow/CELESTE/prepare_ndvi_masked.R's header for why masking lives
+# in its own file/LOI rather than toggled in here: this file's own output
+# is never masked, so it stays a stable, always-available baseline to
+# compare the masked variant against.
+#
+# Usage (from run_celeste.R):
 #   source(here("workflow/CELESTE/prepare_ndvi.R"))
 #   prepare_ndvi_per_group_rasters(group_manifest, cache_dir = cache_dir)
 #

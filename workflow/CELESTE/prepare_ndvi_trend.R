@@ -56,8 +56,12 @@
 #     KEN 123.9s) — a one-time cost, cached to disk per group exactly like
 #     harvest_regen, not repeated on subsequent run_celeste.R sources.
 #
-# Usage (from run_celeste.R, after sourcing workflow/raster_attributes.R and
-# workflow/CELESTE/prepare_ndvi.R):
+# A separate LAKE-MASKED variant of this LOI ("ndvi_trend_masked") exists
+# alongside this one, not in place of it — see workflow/CELESTE/
+# prepare_ndvi_masked.R. This file's own output is never masked.
+#
+# Usage (from run_celeste.R, after sourcing workflow/raster_attributes.R
+# and workflow/CELESTE/prepare_ndvi.R):
 #   source(here("workflow/CELESTE/prepare_ndvi_trend.R"))
 #   prepare_ndvi_trend_rasters(group_manifest, cache_dir = cache_dir)
 #

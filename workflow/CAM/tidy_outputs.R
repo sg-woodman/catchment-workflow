@@ -50,14 +50,24 @@
 #     value spanning a whole record belongs in its own summary table with
 #     no year column, not a fake-year row in the per-year table.
 #
+# "ndvi_masked"/"ndvi_trend_masked" are the lake-masked counterparts of
+# "ndvi"/"ndvi_trend" (see workflow/CAM/prepare_ndvi_masked.R) — same raw
+# column shape as their unmasked counterpart, just with a "ndvi_masked_"/
+# "ndvi_trend_masked_" prefix instead of "ndvi_"/"ndvi_trend_". REGEX
+# CARE: "ndvi_trend_masked_..." columns also start with the literal string
+# "ndvi_trend_", so tidy_hydroweight_ndvi_trend_summary()'s own pattern
+# explicitly excludes anything continuing with "masked_" — otherwise every
+# masked column would double-count into BOTH tables.
+#
 # Usage (from an R session, after CAM_streams_hydroweight.csv and
 # catchment_metrics.csv already exist — i.e. after run_cam_streams.R has
 # been run):
 #   source(here("workflow/R/utils.R"))
 #   source(here("workflow/CAM/tidy_outputs.R"))
 #   tidy_cam_outputs(output_dir = here("output/CAM/stream_delineation"))
-# Writes 6 CSVs into output_dir/tidy/: catchment_metrics_long.csv,
+# Writes 8 CSVs into output_dir/tidy/: catchment_metrics_long.csv,
 # canlcc_long.csv, ndvi_timeseries.csv, ndvi_trend_summary.csv,
+# ndvi_masked_timeseries.csv, ndvi_trend_masked_summary.csv,
 # harvest_regen_timeseries.csv, harvest_regen_combined_summary.csv. Each
 # tidy_*() function can also be called directly on an already-loaded data
 # frame if you don't want the files written.
@@ -251,8 +261,12 @@ tidy_hydroweight_ndvi_timeseries <- function(hw) {
 #' @return Long tibble: site, version, scheme, slope_mean, slope_sd,
 #'   slope_median, slope_min, slope_max, p_value_mean, p_value_sd,
 #'   p_value_median, p_value_min, p_value_max.
+#'
+#' Excludes "ndvi_trend_masked_..." columns explicitly (they also start
+#' with the literal "ndvi_trend_" prefix) — those belong to
+#' tidy_hydroweight_ndvi_trend_masked_summary() instead.
 tidy_hydroweight_ndvi_trend_summary <- function(hw) {
-  cols <- grep("^ndvi_trend_", names(hw), value = TRUE)
+  cols <- grep("^ndvi_trend_(?!masked_)", names(hw), value = TRUE, perl = TRUE)
   empty_cols <- c(
     "slope_mean", "slope_sd", "slope_median", "slope_min", "slope_max",
     "p_value_mean", "p_value_sd", "p_value_median", "p_value_min", "p_value_max"
@@ -269,6 +283,103 @@ tidy_hydroweight_ndvi_trend_summary <- function(hw) {
       cols = dplyr::all_of(cols),
       names_to = "rest",
       names_pattern = "^ndvi_trend_(.+)$",
+      values_to = "raw_value"
+    ) |>
+    dplyr::mutate(
+      variable = dplyr::if_else(startsWith(rest, "slope_"), "slope", "p_value"),
+      rest2 = sub("^(slope|p_value)_", "", rest),
+      is_distwtd = grepl("distwtd", rest2),
+      scheme = normalize_scheme(dplyr::if_else(
+        is_distwtd, sub("_distwtd_(mean|sd)$", "", rest2), "lumped"
+      )),
+      flat_stat = dplyr::if_else(
+        is_distwtd, sub(".*_distwtd_(mean|sd)$", "\\1", rest2), rest2
+      ),
+      col_name = paste0(variable, "_", flat_stat)
+    )
+
+  long |>
+    dplyr::select(site, version, scheme, col_name, raw_value) |>
+    tidyr::pivot_wider(names_from = col_name, values_from = raw_value) |>
+    dplyr::select(site, version, scheme, dplyr::all_of(empty_cols)) |>
+    dplyr::arrange(site, version, scheme)
+}
+
+#' Tidy the "ndvi_masked" (lake-masked continuous, per-year) block —
+#' identical shape/logic to tidy_hydroweight_ndvi_timeseries(), just
+#' reading "ndvi_masked_<idx>_NDVI_<year>_<stat>" columns instead of
+#' "ndvi_<idx>_NDVI_<year>_<stat>". See workflow/CAM/prepare_ndvi_masked.R
+#' for how this LOI is built.
+#'
+#' @param hw Full hydroweight data frame.
+#' @return Long tibble: site, version, year, scheme, mean, sd, median, min,
+#'   max, sum, cell_count, na_cell_count.
+tidy_hydroweight_ndvi_masked_timeseries <- function(hw) {
+  cols <- grep("^ndvi_masked_[0-9]+_NDVI_[0-9]{4}_", names(hw), value = TRUE)
+  if (length(cols) == 0) {
+    return(tibble::tibble(
+      site = character(), version = character(), year = integer(), scheme = character(),
+      mean = double(), sd = double(), median = double(), min = double(),
+      max = double(), sum = double(), cell_count = double(), na_cell_count = double()
+    ))
+  }
+
+  long <- hw |>
+    dplyr::select(site, version, dplyr::all_of(cols)) |>
+    tidyr::pivot_longer(
+      cols = dplyr::all_of(cols),
+      names_to = c("year", "scheme_stat"),
+      names_pattern = "^ndvi_masked_[0-9]+_NDVI_([0-9]{4})_(.+)$",
+      values_to = "raw_value"
+    ) |>
+    dplyr::mutate(
+      year = as.integer(year),
+      is_distwtd = grepl("distwtd", scheme_stat),
+      scheme = normalize_scheme(dplyr::if_else(
+        is_distwtd, sub("_distwtd_(mean|sd)$", "", scheme_stat), "lumped"
+      )),
+      flat_stat = dplyr::if_else(
+        is_distwtd, sub(".*_distwtd_(mean|sd)$", "\\1", scheme_stat), tolower(scheme_stat)
+      )
+    )
+
+  long |>
+    dplyr::select(site, version, year, scheme, flat_stat, raw_value) |>
+    tidyr::pivot_wider(names_from = flat_stat, values_from = raw_value) |>
+    dplyr::select(
+      site, version, year, scheme,
+      mean, sd, median, min, max, sum, cell_count, na_cell_count
+    ) |>
+    dplyr::arrange(site, version, year, scheme)
+}
+
+#' Tidy the "ndvi_trend_masked" (lake-masked Sen's-slope trend) block —
+#' identical shape/logic to tidy_hydroweight_ndvi_trend_summary(), just
+#' reading "ndvi_trend_masked_..." columns. See workflow/CAM/prepare_ndvi_
+#' masked.R for how this LOI is built.
+#'
+#' @param hw Full hydroweight data frame.
+#' @return Long tibble: site, version, scheme, slope_mean, slope_sd,
+#'   slope_median, slope_min, slope_max, p_value_mean, p_value_sd,
+#'   p_value_median, p_value_min, p_value_max.
+tidy_hydroweight_ndvi_trend_masked_summary <- function(hw) {
+  cols <- grep("^ndvi_trend_masked_", names(hw), value = TRUE)
+  empty_cols <- c(
+    "slope_mean", "slope_sd", "slope_median", "slope_min", "slope_max",
+    "p_value_mean", "p_value_sd", "p_value_median", "p_value_min", "p_value_max"
+  )
+  if (length(cols) == 0) {
+    empty <- tibble::tibble(site = character(), version = character(), scheme = character())
+    for (nm in empty_cols) empty[[nm]] <- double()
+    return(empty)
+  }
+
+  long <- hw |>
+    dplyr::select(site, version, dplyr::all_of(cols)) |>
+    tidyr::pivot_longer(
+      cols = dplyr::all_of(cols),
+      names_to = "rest",
+      names_pattern = "^ndvi_trend_masked_(.+)$",
       values_to = "raw_value"
     ) |>
     dplyr::mutate(
@@ -358,11 +469,11 @@ tidy_hydroweight_harvest_regen_combined_summary <- function(hw) {
 # -- Orchestrator -------------------------------------------------------------
 
 #' Read catchment_metrics.csv and CAM_streams_hydroweight.csv from
-#' output_dir, tidy both into 5 purpose-shaped long tables, and write the
+#' output_dir, tidy both into 7 purpose-shaped long tables, and write the
 #' results to output_dir/tidy/
 #'
 #' Warns (does not abort) if any hydroweight column besides site/version
-#' wasn't claimed by one of the 4 known LOI prefixes — a safety net for when
+#' wasn't claimed by one of the 6 known LOI prefixes — a safety net for when
 #' loi_layers in run_cam_streams.R gains a new LOI this script doesn't know
 #' how to parse yet; those columns are silently excluded from every tidy
 #' output until this script is extended, rather than crashing the reshape.
@@ -375,7 +486,7 @@ tidy_hydroweight_harvest_regen_combined_summary <- function(hw) {
 #' @param metrics_file,hydroweight_file Character. Filenames within
 #'   output_dir. Defaults match run_cam_streams.R's actual output names.
 #'
-#' @return Invisibly, a named list of the 5 tidy tibbles, already written to
+#' @return Invisibly, a named list of the 7 tidy tibbles, already written to
 #'   disk.
 tidy_cam_outputs <- function(
   output_dir,
@@ -398,7 +509,9 @@ tidy_cam_outputs <- function(
   claimed_cols <- c(
     grep("^canlcc_", names(hw), value = TRUE),
     grep("^ndvi_[0-9]+_NDVI_[0-9]{4}_", names(hw), value = TRUE),
-    grep("^ndvi_trend_", names(hw), value = TRUE),
+    grep("^ndvi_trend_(?!masked_)", names(hw), value = TRUE, perl = TRUE),
+    grep("^ndvi_masked_[0-9]+_NDVI_[0-9]{4}_", names(hw), value = TRUE),
+    grep("^ndvi_trend_masked_", names(hw), value = TRUE),
     grep("^harvest_regen_", names(hw), value = TRUE)
   )
   unclaimed <- setdiff(names(hw), c("site", "version", claimed_cols))
@@ -417,6 +530,8 @@ tidy_cam_outputs <- function(
     canlcc_long = tidy_hydroweight_canlcc(hw, year = canlcc_year),
     ndvi_timeseries = tidy_hydroweight_ndvi_timeseries(hw),
     ndvi_trend_summary = tidy_hydroweight_ndvi_trend_summary(hw),
+    ndvi_masked_timeseries = tidy_hydroweight_ndvi_masked_timeseries(hw),
+    ndvi_trend_masked_summary = tidy_hydroweight_ndvi_trend_masked_summary(hw),
     harvest_regen_timeseries = tidy_hydroweight_harvest_regen_timeseries(hw),
     harvest_regen_combined_summary = tidy_hydroweight_harvest_regen_combined_summary(hw)
   )
