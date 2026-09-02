@@ -128,9 +128,9 @@ resolve_engine_config <- function(config) {
   # only — flattening has to happen before D8 derivation) and the same
   # source vocabulary, deliberately mirrored so the two options read the
   # same way in a run_config. Opt-in, default "none" — a project supplying
-  # an already-conditioned flow_direction/flow_pointer (e.g. CAM's OIH
-  # data) should have zero behavior change; that pre-conditioned surface
-  # is trusted as-is, which is the whole point of supplying one.
+  # an already-conditioned flow_direction/flow_pointer should have zero
+  # behavior change; that pre-conditioned surface is trusted as-is, which
+  # is the whole point of supplying one.
   lake_source <- config$lake_conditioning[["source"]] %||% "none"
   if (terrain_tier != "dem" && lake_source != "none") {
     cw_warn(glue::glue(

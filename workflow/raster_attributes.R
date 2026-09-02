@@ -18,6 +18,9 @@
 #     layers (e.g. harvest vs. regen disturbance polygons) into one
 #     categorical raster with temporal precedence between classes, one band
 #     per year plus one all-years-combined band
+#   mask_out_waterbodies()  — set every cell touching a waterbody polygon to
+#     NA (e.g. keeping an NDVI LOI terrestrial-only before it's summarized
+#     per catchment)
 #
 # Dependencies: terra, trend, sf
 # =============================================================================
@@ -177,15 +180,15 @@ sens_slope_trend <- function(r, x = NULL, min_obs = 4, cores = 1) {
 #' Match a group's own regional source tiles by filename
 #'
 #' Case-insensitive match on group_id as a filename token, with an optional
-#' "Celeste_" prefix and an optional trailing tile number (e.g. "NIP1"..
-#' "NIP5", "KEN1".."KEN4") — the naming convention across CELESTE's
-#' data/ndvi/*.tif tiles (verified via check_tile_consistency()). Used to
-#' mosaic ONLY a group's own tiles rather than cropping a shared multi-
-#' region VRT — see prepare_ndvi_trend_rasters() and
-#' prepare_ndvi_per_group_rasters() in workflow/CELESTE/ for why this
-#' matters for runtime, not just tidiness (a crop from a much larger VRT
-#' measured ~3x slower for the same real data, purely from GDAL considering
-#' far more candidate source tiles than necessary).
+#' literal project-name prefix (matching this project's own tile-naming
+#' convention, e.g. one project uses "Celeste_") and an optional trailing
+#' tile number (e.g. "NIP1".."NIP5", "KEN1".."KEN4" — verified via
+#' check_tile_consistency()). Used to mosaic ONLY a group's own tiles
+#' rather than cropping a shared multi-region VRT — see that project's own
+#' `prepare_*.R` scripts and README for why this matters for runtime, not
+#' just tidiness (a crop from a much larger VRT measured ~3x slower for
+#' the same real data, purely from GDAL considering far more candidate
+#' source tiles than necessary).
 #'
 #' @param files Character vector of candidate tile file paths.
 #' @param group_id Character. Group identifier to match.
@@ -241,9 +244,10 @@ check_tile_consistency <- function(files) {
 #' a real correctness hazard: cropping/masking that area for a site whose
 #' catchment falls outside every tile's coverage returns valid-looking
 #' zeros indistinguishable from real data, rather than failing or returning
-#' NA (confirmed directly: a VRT built from CELESTE's data/ndvi/*.tif tiles,
-#' which do not cover the NBE group at all, returned exactly 0 for every
-#' NBE catchment until this fix was applied). This function always passes
+#' NA (confirmed directly: a VRT built from a real project's regional NDVI
+#' tiles, which did not cover one entire group, returned exactly 0 for
+#' every catchment in that group until this fix was applied — see the
+#' relevant project's README for the specific case). This function always passes
 #' `-vrtnodata` so uncovered areas correctly read as NA, letting
 #' the existing "all NA after crop/mask" checks in the hydroweight modules
 #' catch and skip them instead of silently computing wrong results.
@@ -299,9 +303,9 @@ build_mosaic_vrt <- function(files, vrt_path, nodata = "nan", overwrite = TRUE) 
 #' exception (`buckets` order settles them — see below).
 #'
 #' Geometry hygiene: features are cast to MULTIPOLYGON (fixes mixed
-#' MULTIPOLYGON/MULTISURFACE layers — a real issue found in
-#' ontario_harvest.gdb's newer-vintage layers, which terra::vect() cannot
-#' read directly) and passed through st_make_valid() before rasterizing.
+#' MULTIPOLYGON/MULTISURFACE layers — a real issue found in a real source
+#' gdb's newer-vintage layers, which terra::vect() cannot read directly)
+#' and passed through st_make_valid() before rasterizing.
 #'
 #' @param buckets    Named list, IN PRIORITY ORDER — when two buckets' most
 #'   recent year is exactly equal at a cell (always true for a per-year
@@ -395,12 +399,13 @@ rasterize_competing_classes <- function(
     # real, confirmed failure: wkt_filter is pushed down to OGR BEFORE any
     # R-side geometry cleanup, and curved geometries (MULTISURFACE — the
     # same issue rasterize_competing_classes() already casts away below)
-    # make that push-down unreliable. Confirmed on two real datasets, two
-    # different severities: Ontario's harvest gdb silently dropped some
-    # (not all) curved features near a filter boundary (a handful out of
-    # ~4100 province-wide); New Brunswick's gdb returned ZERO features for
+    # make that push-down unreliable. Confirmed on two real source gdbs,
+    # two different severities: one silently dropped some (not all) curved
+    # features near a filter boundary (a small fraction of a much larger
+    # province-wide feature count); another returned ZERO features for
     # every crop_to tried, including a 100km buffer around a real site
-    # coordinate confirmed well inside the layer's own reported extent.
+    # coordinate confirmed well inside the layer's own reported extent
+    # (see the relevant project's README for the specific sources).
     # Reading in full and filtering in R afterward, once geometries are
     # already cleaned up, is slower but correct regardless of the source's
     # curve usage.
@@ -500,16 +505,18 @@ rasterize_competing_classes <- function(
   # Operates on plain in-memory numeric vectors (terra::values()), not
   # SpatRaster ifel() — each ifel() call is disk-backed and, measured
   # directly against this, ~4x slower per bucket than the vector
-  # equivalent (confirmed: cut a 12-group real-data run from ~200s to well
-  # under a minute for TUR). Writes the result straight to out_path and
-  # returns only the path — critical for large groups, not just tidy:
-  # KEN's grid is 139.5M cells (3.5x TUR's); the original version of this
-  # function returned a SpatRaster and the caller accumulated all 24
+  # equivalent (confirmed: cut a real multi-group run's per-group time from
+  # ~200s to well under a minute for one mid-sized group). Writes the
+  # result straight to out_path and returns only the path — critical for
+  # large groups, not just tidy: the largest group tested had a grid
+  # several times larger than a typical group's; the original version of
+  # this function returned a SpatRaster and the caller accumulated all 24
   # (23 years + combined) of them in a list before combining at the end,
   # which meant ~24 in-memory full-size rasters alive simultaneously and
-  # OOM-killed a real run on KEN (confirmed: exit 137). Writing
-  # immediately and keeping only the (tiny) file path means at most one
-  # band's worth of full-size vectors is ever alive at a time.
+  # OOM-killed a real run on that group (confirmed: exit 137 — see the
+  # relevant project's README for the exact figures). Writing immediately
+  # and keeping only the (tiny) file path means at most one band's worth
+  # of full-size vectors is ever alive at a time.
   combine_bucket_years <- function(year_rasters, out_path) {
     n_cell <- terra::ncell(template)
     best_year <- rep(NA_real_, n_cell)
@@ -574,6 +581,44 @@ rasterize_competing_classes <- function(
   out <- terra::rast(c(year_paths, combined_path))
   names(out) <- c(paste0("y", years), "combined")
   out
+}
+
+# -- Waterbody masking ---------------------------------------------------------
+
+#' Mask waterbody polygons out of a raster (set intersecting cells to NA)
+#'
+#' Built for keeping a continuous LOI (e.g. NDVI) terrestrial-only before
+#' it's summarized per catchment — a lake/pond/river pixel's reflectance
+#' reads low or negative and isn't part of the terrestrial vegetation
+#' signal a "mean NDVI" or NDVI trend is meant to characterize; leaving
+#' water pixels in systematically drags a catchment's summarized value
+#' down in proportion to how much open water it contains, confounding
+#' vegetation signal with lake cover. Generic and project-agnostic — takes
+#' whatever waterbody polygons the caller has already resolved (NHN, OHN,
+#' or any other source), in any CRS.
+#'
+#' @param raster      SpatRaster (any number of layers — masking is
+#'   applied identically to every layer).
+#' @param waterbodies sf object or terra SpatVector of waterbody polygons,
+#'   in ANY CRS (reprojected internally to `raster`'s CRS). NULL or 0-row
+#'   input returns `raster` unchanged — "nothing to mask" is a normal,
+#'   expected outcome (e.g. a catchment with no mapped waterbody), not an
+#'   error.
+#' @return SpatRaster, same layers/extent/resolution as `raster`, with
+#'   every cell touching a waterbody polygon (`touches = TRUE` — a
+#'   shoreline cell only partially covered by the polygon is masked too,
+#'   not just fully-submerged interior cells) set to NA.
+mask_out_waterbodies <- function(raster, waterbodies) {
+  if (is.null(waterbodies) || nrow(waterbodies) == 0) {
+    return(raster)
+  }
+  # terra::vect() has no method for an input that's ALREADY a SpatVector
+  # (confirmed directly: "unable to find an inherited method for function
+  # 'vect' for signature x = 'SpatVector'") — only convert when it isn't
+  # one already, rather than calling vect() unconditionally.
+  wb_vect <- if (inherits(waterbodies, "SpatVector")) waterbodies else terra::vect(waterbodies)
+  wb_vect <- terra::project(wb_vect, terra::crs(raster))
+  terra::mask(raster, wb_vect, inverse = TRUE, touches = TRUE)
 }
 
 # -- Null coalescing operator (mirrors standard R 4.4+ behaviour) ----

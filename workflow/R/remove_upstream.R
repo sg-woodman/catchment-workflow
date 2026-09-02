@@ -1,10 +1,10 @@
 # remove_upstream.R
 # ---------------------------------------------------------------------------
 # Clips each site's catchment to remove the contributing area of any nested
-# upstream sites. This is the river-site equivalent of the upstream lake
-# clipping step in the CAM workflow — instead of erasing upstream lake
-# catchments, smaller site catchments that fall within a larger downstream
-# site's catchment are erased.
+# upstream sites. This is the point-pour-point equivalent of the upstream
+# lake clipping step used by lake-polygon projects (remove_upstream_lakes.R)
+# — instead of erasing upstream lake catchments, smaller site catchments
+# that fall within a larger downstream site's catchment are erased.
 #
 # Steps:
 #   1. Build a pool of all site catchments (catchment.gpkg from each site
@@ -71,11 +71,11 @@ remove_upstream_catchments <- function(sites, output_dir) {
   # (build_catchment_pool() transforms every catchment to it) — but the
   # WRITTEN catchment_clipped.gpkg must come back out in whatever CRS the
   # rest of THIS project actually uses, not silently stay in 3979. Fine
-  # (a no-op) for a 3979-native project (CELESTE); a real, previously
-  # unhandled mismatch for any other working CRS — confirmed directly on
-  # CAM streams (EPSG:3161 catchments): catchment_clipped.gpkg came out in
+  # (a no-op) for a 3979-native project; a real, previously unhandled
+  # mismatch for any other working CRS — confirmed directly on a project
+  # with non-3979 catchments: catchment_clipped.gpkg came out in
   # EPSG:3979, which then made every downstream terra::crop() against a
-  # 3161-native raster fail with "[crop] extents do not overlap" — the
+  # non-3979-native raster fail with "[crop] extents do not overlap" — the
   # geometry was valid, just numerically in the wrong CRS relative to
   # everything else.
   native_crs <- attr(catchment_pool, "native_crs")
@@ -164,8 +164,7 @@ build_catchment_pool <- function(sites, output_dir) {
   }
 
   # Capture the catchments' own native CRS (all sites in one project share
-  # one working CRS — EPSG:3979 for a CELESTE-style project, but not
-  # necessarily for others, e.g. EPSG:3161 for CAM streams) BEFORE
+  # one working CRS, but that CRS varies by project's terrain source) BEFORE
   # transforming to a fixed EPSG:3979 working CRS for the erase/
   # intersection math below — clip_site_catchment() transforms the final
   # output back to this before writing, so catchment_clipped.gpkg always
@@ -286,11 +285,11 @@ clip_site_catchment <- function(site_id, catchment_pool, output_dir, native_crs 
           # workflow/R/lake_containment.R), which can leave the corrected
           # site's boundary and an unrelated neighbor's boundary
           # overlapping in a way that isn't clean nesting anymore.
-          # Confirmed directly: a lake-correction on CELESTE's BAT2NEW
-          # produced a 3-part disconnected catchment_clipped.gpkg, and one
-          # on SN1UP produced a clipped catchment that no longer contained
-          # its own pour point — both silently written before this check
-          # existed.
+          # Confirmed directly on real sites: a lake-correction produced a
+          # 3-part disconnected catchment_clipped.gpkg for one site, and a
+          # clipped catchment that no longer contained its own pour point
+          # for another — both silently written before this check existed
+          # (see the relevant project's README for the specific sites).
           fragmentation_ok <- nrow(sf::st_cast(clipped, "POLYGON", warn = FALSE)) <=
             nrow(sf::st_cast(focal, "POLYGON", warn = FALSE))
 

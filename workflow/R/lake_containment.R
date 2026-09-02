@@ -1,28 +1,27 @@
 # lake_containment.R
 # ---------------------------------------------------------------------------
 # Shared "does this catchment fully contain this lake" primitives, used by
-# both project kinds:
+# both delineation approaches:
 #
-#   - validate_lake_containment() — CAM lakes (lake-polygon pour point):
-#     each site has exactly one designated lake (config$lake_polygons'
-#     matched_lake join key). Currently dormant/unwired — a scan of all 45
-#     CAM lakes sites found 0 bisected, so there's nothing to fix there
-#     today, but the check is cheap QA infrastructure worth keeping.
+#   - validate_lake_containment() — for a project with a lake-polygon pour
+#     point, where each site has exactly one designated lake
+#     (config$lake_polygons' matched_lake join key).
 #
-#   - validate_catchment_lake_intersections() — point-based projects (CAM
-#     streams; potentially CELESTE later) with no single designated lake per
-#     site: spatially joins each catchment against a project-wide waterbody
-#     layer and flags any intersecting lake that's only partially contained.
-#     This is the active case — see workflow/CAM/fix_lake_bisection.R.
+#   - validate_catchment_lake_intersections() — for point-pour-point
+#     projects with no single designated lake per site: spatially joins
+#     each catchment against a project-wide waterbody layer and flags any
+#     intersecting lake that's only partially contained. See each
+#     project's own fix_lake_bisection.R for how this is invoked.
 #
 # Root cause (both cases): wbt_watershed() traces strictly by per-cell D8
 # flow direction. Nothing guarantees a lake polygon is flow-consistent (all
 # interior cells routing to one outlet) unless something explicitly enforces
-# it — OIH's own hydro-enforcement only "improves flow direction" for
-# waterbodies intersecting the mapped Enhanced Watercourse network, not
-# universally (OIH User Guide, Hydro Enforcement Overview). Where that
-# doesn't hold, a traced watershed boundary can slice through a lake instead
-# of being a strict superset (or fully excluding it).
+# it — a pre-conditioned flow-direction source's own hydro-enforcement, when
+# one is supplied, may only improve flow direction for waterbodies
+# intersecting its own mapped watercourse network, not universally (see the
+# source's own documentation). Where that doesn't hold, a traced watershed
+# boundary can slice through a lake instead of being a strict superset (or
+# fully excluding it).
 #
 # Dependencies: sf, dplyr, purrr, tibble, fs, readr, glue (via utils.R)
 # ---------------------------------------------------------------------------
@@ -54,8 +53,9 @@ lake_containment_pct <- function(lake_sf, catchment_sf) {
 
 #' Validate lake containment for every site against its own designated lake
 #'
-#' CAM lakes case: each site has exactly one matched lake
-#' (config$lake_polygons' matched_lake column, keyed to sites$lake_name).
+#' For a project with a lake-polygon pour point: each site has exactly one
+#' matched lake (config$lake_polygons' matched_lake column, keyed to
+#' sites$lake_name).
 #'
 #' @param sites          tibble with site_id, lake_name columns
 #' @param lake_polys     SpatVector or sf from match_lake_polygons(), with a
@@ -147,7 +147,7 @@ validate_lake_containment <- function(sites, lake_polys, output_dir, threshold_p
 #' @param sites                    tibble with site_id column
 #' @param output_dir               Character. Root output directory (reads
 #'   <site_id>/<catchment_file>, writes lake_intersection_report.csv here)
-#' @param lakes_path                Character. Path to OHN/OIH waterbody layer
+#' @param lakes_path                Character. Path to a project-wide waterbody layer
 #' @param catchment_file           Character. Which per-site file to check —
 #'   "catchment.gpkg" (root-cause check, before any correction) or
 #'   "catchment_clipped.gpkg" (post-correction final QA, also catches
@@ -231,11 +231,10 @@ validate_catchment_lake_intersections <- function(
 #'
 #' Pure spatial-join + threshold worker, extracted so it can be shared
 #' between validate_catchment_lake_intersections() (one project-wide lake
-#' source, e.g. CAM's single OHN file) and
+#' source, e.g. a single province-wide waterbody file) and
 #' validate_catchment_lake_intersections_by_group() (a per-group lake
-#' source, e.g. CELESTE's per-HydroBasins-group NHN reads) — this function
-#' itself has no opinion on where lakes_sf came from or how it was
-#' resolved.
+#' source, e.g. per-HydroBasins-group NHN reads) — this function itself
+#' has no opinion on where lakes_sf came from or how it was resolved.
 #'
 #' @param catchments_sf   sf object with a site_id column, one row per site,
 #'   already st_make_valid()'d
@@ -246,9 +245,10 @@ validate_catchment_lake_intersections <- function(
 #' @param partial_band             Numeric length-2. Default c(2, 98).
 #' @param waterbody_type_col       Character. Name of the column in
 #'   lakes_sf holding waterbody type, used against
-#'   exclude_waterbody_types. Default "WATERBODY_" (OHN's own field name;
-#'   CELESTE's NHN-derived lakes_sf renames "waterDefinitionText" to this
-#'   before calling, so this worker never needs to know the source schema).
+#'   exclude_waterbody_types. Default "WATERBODY_" — one common waterbody
+#'   source's own field name; a caller whose source uses a different
+#'   schema (e.g. NHN's "waterDefinitionText") renames its column to this
+#'   before calling, so this worker never needs to know the source schema.
 #'
 #' @return A long tibble (site_id, OGF_ID, lake_name, lake_area_ha,
 #'   pct_lake_outside), one row per flagged (site, lake) pair. Empty
@@ -311,24 +311,25 @@ flag_catchment_lake_pairs <- function(
 #' Validate lake containment per group, for projects with no single
 #' project-wide lake source
 #'
-#' CELESTE's case: NHN waterbodies are only available per HydroBasins
-#' group (read from local GDBs relevant to that group's AOI), unlike CAM's
-#' single province-wide OHN file — so there's no one `lakes_path` to hand
-#' validate_catchment_lake_intersections(). This loops sites$group_id,
-#' resolving each group's lakes via a caller-supplied closure, and unions
-#' the results.
+#' For a project where waterbody data is only available per spatial group
+#' (e.g. read from local per-region files relevant to that group's AOI)
+#' rather than as one combined project-wide file — so there's no one
+#' `lakes_path` to hand validate_catchment_lake_intersections(). This loops
+#' sites$group_id, resolving each group's lakes via a caller-supplied
+#' closure, and unions the results.
 #'
 #' @param sites          tibble with site_id, group_id columns
 #' @param output_dir     Character. Root output directory
 #' @param fetch_lakes_fn Function(group_catchments_sf, group_id) -> sf
 #'   object with OGF_ID/OFFICIAL_N/<waterbody_type_col> columns, already in
 #'   group_catchments_sf's CRS, or NULL/0-row if none found. A
-#'   project-specific closure — e.g. CELESTE's fetch_nhn_lakes_for_group()
-#'   in workflow/CELESTE/fix_lake_bisection.R.
+#'   project-specific closure — see the relevant project's own
+#'   fix_lake_bisection.R.
 #' @param catchment_file           Character. Default "catchment.gpkg".
 #' @param min_lake_area_ha         Numeric. Default 1.
 #' @param exclude_waterbody_types  Character vector. Default c("River",
-#'   "Pond") — override per source (e.g. CELESTE passes c("Watercourse")).
+#'   "Pond") — override to match the calling project's own waterbody-type
+#'   schema (see that project's README).
 #' @param partial_band             Numeric length-2. Default c(2, 98).
 #' @param waterbody_type_col       Character. Default "WATERBODY_" —
 #'   override to match fetch_lakes_fn's actual column name if it isn't
@@ -428,12 +429,13 @@ validate_catchment_lake_intersections_by_group <- function(
 #' (wbt_breach_depressions_least_cost()) — confirmed by direct testing to
 #' matter: breach is built for small, localized pits (it carves a channel
 #' through them) and does not resolve the large, genuinely-flat region
-#' FlattenLakes creates. Run against Daisy Lake, breach produced a
+#' FlattenLakes creates. Tested against a real lake, breach produced a
 #' catchment collapsed to a single ~900 sq m cell (the pour point landing in
 #' the flattened lake's now-ambiguous flat with no assigned downstream
-#' direction). fill_depressions(fix_flats = TRUE) imposes the tiny gradient
-#' standard practice uses to guarantee flow converges to one outlet across a
-#' flat — the standard FlattenLakes -> FillDepressions -> D8Pointer sequence.
+#' direction — see the relevant project's README for the specific case).
+#' fill_depressions(fix_flats = TRUE) imposes the tiny gradient standard
+#' practice uses to guarantee flow converges to one outlet across a flat —
+#' the standard FlattenLakes -> FillDepressions -> D8Pointer sequence.
 #'
 #' ACCUMULATES across repeated calls, keyed by lake_polys' OGF_ID column,
 #' via the persisted lakes_to_flatten.shp itself: a lake flattened in an
@@ -450,13 +452,13 @@ validate_catchment_lake_intersections_by_group <- function(
 #' reintroduce the bug above.
 #'
 #' Prefers cache_dir/dem_burned.tif over cache_dir/dem.tif when present —
-#' a group whose raw-DEM terrain tier burns NHN streams in before breaching
-#' (engine/02_prepare_terrain.R's prepare_raw_dem_tier(), CELESTE's normal
-#' path for 5 of its 6 HydroBasins groups) needs lake-flattening applied on
-#' top of that already-burned surface, not the pre-burn DEM — otherwise the
-#' corrected pointer would silently discard the stream-burn-in correction
-#' for the group. CAM streams never produces a dem_burned.tif (its
-#' flow_direction tier has no burn step), so this is a no-op there — always
+#' a group whose raw-DEM terrain tier burns streams in before breaching
+#' (engine/02_prepare_terrain.R's prepare_raw_dem_tier()) needs
+#' lake-flattening applied on top of that already-burned surface, not the
+#' pre-burn DEM — otherwise the corrected pointer would silently discard
+#' the stream-burn-in correction for the group. A project whose terrain
+#' tier never produces a dem_burned.tif (e.g. a pre-conditioned
+#' flow_direction tier, which has no burn step) is a no-op here — always
 #' falls through to dem.tif, unchanged behavior.
 #'
 #' @param cache_dir     Character. Project or group cache directory (must

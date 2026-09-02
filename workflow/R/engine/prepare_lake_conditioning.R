@@ -8,8 +8,8 @@
 # pointer derivation.
 #
 # WHY THIS EXISTS: reactively detecting and correcting individual bisected
-# catchments after delineation (workflow/R/lake_containment.R,
-# workflow/CELESTE/fix_lake_bisection.R) works, but is fixing a symptom.
+# catchments after delineation (workflow/R/lake_containment.R and each
+# project's own fix_lake_bisection.R) works, but is fixing a symptom.
 # Correcting one site's D8 pointer without touching an overlapping
 # neighbor's breaks remove_upstream_catchments()'s implicit assumption that
 # every site in a group is traced from the SAME flow field, so nested
@@ -22,10 +22,11 @@
 # whole bug class this file exists to prevent can't occur.
 #
 #   source = "nhn_auto"  — fetch_nhn_lakes_for_aoi() below, generalizing
-#     workflow/CELESTE/fix_lake_bisection.R's fetch_nhn_lakes_for_group()
-#     to key off the group's AOI directly (group_manifest$aoi) instead of
-#     already-delineated catchments, since at this point in the pipeline
-#     (Stage 2, terrain prep) no catchment exists yet.
+#     the reactive fix's own fetch_nhn_lakes_for_group() (see the relevant
+#     project's fix_lake_bisection.R) to key off the group's AOI directly
+#     (group_manifest$aoi) instead of already-delineated catchments, since
+#     at this point in the pipeline (Stage 2, terrain prep) no catchment
+#     exists yet.
 #   source = "supplied"  — reads config$lake_conditioning$path directly,
 #     clips to the group AOI (any vector format sf::st_read() handles).
 #   source = "none"      — never reaches this file (00_resolve_config.R
@@ -48,7 +49,7 @@
 # Requires workflow/R/stream/burn_streams.R already sourced for
 # find_nhn_sheets()/read_nhn_from_gdb() (reused unmodified — same NHN
 # reading primitives streams_burn's nhn_auto path and the reactive
-# CELESTE fix both already use).
+# per-project fix both already use).
 #
 # Dependencies: sf, terra, whitebox, dplyr, purrr, fs, glue, cli (via
 # utils.R)
@@ -58,14 +59,15 @@
 #'
 #' Deliberately scopes the lake search to a buffer around the group's own
 #' SITES, not the group's full terrain-conditioning AOI — confirmed
-#' directly (2026-08-29) that the latter is wildly disproportionate: for
-#' CELESTE's KEN group, the HydroBasins group AOI is 58,928 sq km (the
-#' group's 21 sites' own bare bounding box is 2,663 sq km, ~22x smaller),
-#' and a first attempt scoped to the full group AOI pulled in 31,525
-#' candidate lakes and took ~68 minutes for one group. A lake far from
-#' every site in the group can't affect any site's catchment or its
-#' nesting relationship with a neighbor — the only property this feature
-#' needs to preserve — so there's no correctness reason to flatten it.
+#' directly that the latter is wildly disproportionate for a real,
+#' densely-lake-covered HydroBasins group: the group AOI ran ~22x larger
+#' than the group's own sites' bare bounding box, and a first attempt
+#' scoped to the full group AOI pulled in tens of thousands of candidate
+#' lakes and took over an hour for one group (see the relevant project's
+#' README for the exact figures). A lake far from every site in the group
+#' can't affect any site's catchment or its nesting relationship with a
+#' neighbor — the only property this feature needs to preserve — so
+#' there's no correctness reason to flatten it.
 #'
 #' @param config          Resolved config from resolve_engine_config()
 #'   (lake_conditioning$source/min_area_ha/exclude_types/site_buffer_m
@@ -197,8 +199,8 @@ build_site_buffer_aoi <- function(sites, group_id, working_crs, buffer_m) {
 
 #' Fetch NHN lake/reservoir polygons for a group's AOI, unclipped
 #'
-#' Generalizes workflow/CELESTE/fix_lake_bisection.R's
-#' fetch_nhn_lakes_for_group() to key off a group's AOI directly rather
+#' Generalizes the reactive fix's own fetch_nhn_lakes_for_group() (see the
+#' relevant project's fix_lake_bisection.R) to key off a group's AOI directly rather
 #' than already-delineated site catchments — at terrain-prep time (Stage
 #' 2) no catchment exists yet. Deliberately does NOT reuse stream/
 #' burn_streams.R's read_merge_nhn_layer(): that function clips each
@@ -220,8 +222,8 @@ build_site_buffer_aoi <- function(sites, group_id, working_crs, buffer_m) {
 #' @param exclude_types    Character vector of waterDefinitionText values
 #'   to exclude (e.g. "Watercourse")
 #' @return sf object with OGF_ID, OFFICIAL_N, WATERBODY_ columns (renamed
-#'   from NHN's nid/lakeName1/waterDefinitionText, same normalization the
-#'   reactive fix uses), in aoi's CRS. NULL if nothing found.
+#'   from NHN's own nid/lakeName1/waterDefinitionText, same normalization
+#'   the reactive fix uses), in aoi's CRS. NULL if nothing found.
 fetch_nhn_lakes_for_aoi <- function(aoi, nhn_index_path, nhn_raw_dir, group_id,
                                      min_area_ha = 1, exclude_types = c("Watercourse")) {
   nhn_idx <- sf::st_read(nhn_index_path, quiet = TRUE)

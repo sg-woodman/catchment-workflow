@@ -396,7 +396,7 @@ compute_relief_metrics <- function(dem, geom, site_id, drainage_density = NULL) 
 
 # -- Lake metrics --------------------------------------------------------------
 
-#' Compute lake morphometric metrics from the matched OHN lake polygon
+#' Compute lake morphometric metrics from the matched lake polygon
 #'
 #' Returns all-NA when lake_poly is NULL. The lake polygon is projected to
 #' EPSG:3979 before computation so all results are in metric units.

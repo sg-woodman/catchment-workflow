@@ -26,8 +26,9 @@
 # Terrain tier (resolved in 00_resolve_config.R, highest-conditioning wins):
 #   flow_pointer   supplied → crop, use directly. No breach.
 #   flow_direction supplied → crop, recode to WBT encoding (config$flow_direction$recode
-#                    matrix, e.g. OIH's rotation table — generic here, not
-#                    OIH-specific). No breach.
+#                    matrix, e.g. a rotation table mapping one encoding to
+#                    another — generic here, not tied to any particular
+#                    source's own encoding). No breach.
 #   dem            (raw) only → crop, run 02_prepare_streams_burn.R's
 #                    resolve_streams_burn() [config$streams_burn], then
 #                    wbt_breach_depressions_least_cost(), then — only if
@@ -39,10 +40,12 @@
 #                    "none" (workflow/R/engine/00_resolve_config.R) — a
 #                    no-op, identical to before this feature existed.
 #
-# For every tier, `dem` — if separately supplied (e.g. CAM streams' OIH
-# case: flow_direction for conditioning, dem for the elevation surface used
-# in per-site clipping/output/hydroweight) — is cropped and cached as
-# dem.tif regardless of which tier drove pointer generation. Cropping to
+# For every tier, `dem` — if separately supplied (e.g. a project whose
+# flow_direction conditions the terrain but has no accompanying elevation
+# values of its own, so a separate dem is supplied purely for the
+# elevation surface used in per-site clipping/output/hydroweight) — is
+# cropped and cached as dem.tif regardless of which tier drove pointer
+# generation. Cropping to
 # each group's AOI is applied uniformly for both grouping strategies —
 # for "whole_domain" the AOI already equals the source's own full extent
 # (see 01_build_group_manifest.R::whole_domain_aoi()), so the crop is a
@@ -82,7 +85,7 @@ prepare_engine_terrain <- function(config, group_manifest) {
 
     # -- dem.tif: cache the best-available elevation surface if supplied,
     # independent of which tier drives conditioning (decoupled on purpose —
-    # e.g. CAM streams' flow_direction supersedes dem for conditioning, but
+    # e.g. a project's flow_direction supersedes dem for conditioning, but
     # dem is still what per-site output/hydroweight clip against).
     if (!is.null(config$dem[["path"]]) && !cache_exists(dem_path)) {
       crop_and_reproject_source(

@@ -4,25 +4,13 @@
 # through a lake polygon instead of fully containing it or fully excluding
 # it, which is hydrologically impossible.
 #
-# Root cause: point-based delineation (workflow/R/engine/04_delineate_site.R's
-# delineate_engine_point_site()) has zero lake awareness — wbt_watershed()
-# traces strictly by per-cell D8 flow direction from a single pour point,
-# and nothing guarantees a lake polygon it happens to cross is
-# flow-consistent (all interior cells routing to one outlet). OIH's own
-# hydro-enforcement only "improves flow direction" for waterbodies
-# intersecting the mapped Enhanced Watercourse network — not universally.
-# See workflow/R/lake_containment.R's header and the plan this was built
-# from for the full writeup.
-#
-# Confirmed on the delivered CAM streams output (2026-08-27): 11 (site,
-# lake) pairs across 7 sites — Tilton, Daisy, NCMN, SUD17, SUD102 (x3),
-# SUD103 (x1), SUD200 (x3) — genuinely bisect a lake >= 1 ha, excluding
-# River/Pond waterbody types and boundary-touch noise (<2%/>98% overlap).
-#
-# SCOPE: CAM streams only. CELESTE uses a different terrain tier (raw MRDEM
-# + per-group HydroBasins breach, not OIH's flow_direction tier) and a
-# different lake source (NHN, not scanned) — a separate follow-on, not
-# covered here.
+# Root cause: point-based delineation has zero lake awareness —
+# wbt_watershed() traces strictly by per-cell D8 flow direction, and
+# nothing guarantees a lake polygon it happens to cross is flow-consistent.
+# See workflow/R/lake_containment.R's header for the general writeup, and
+# workflow/CAM/README.md's "Lake-bisection fix" section for the scan
+# results, the affected sites, and why CAM streams has no upfront-
+# prevention equivalent (unlike CELESTE — see workflow/CELESTE/README.md).
 #
 # WORKFLOW: validation is automatic and side-effect-free; correction is a
 # deliberate, manually-gated second step — sourcing this file never rewrites
@@ -47,22 +35,11 @@
 #      session too, as long as run_cam_streams.R has been re-sourced first.
 #
 # Safe to call correct_lake_bisected_sites() repeatedly, including as a
-# second/third pass after reviewing residual flags: validate_catchment_
-# lake_intersections() and rerun_engine_sites() are idempotent, and
-# prepare_lake_corrected_flow_pointer() self-detects a grown flagged-lake
-# set and accumulates (persisted in cache_dir/lake_corrected/
-# lakes_to_flatten.gpkg) — never delete that directory between passes, only
-# the accumulation makes it safe for a later pass to redelineate a site
-# without silently un-flattening an earlier pass's fix for some OTHER site
-# sharing the same corrected pointer (confirmed: deleting it before a
-# second pass reverted 4 sites' fixes).
-#
-# Densely-lake-packed clusters (confirmed: SUD17/SUD102/SUD103/SUD200) can
-# still show a whack-a-mole pattern across passes — fixing one site's
-# boundary can newly, slightly bisect a different nearby lake that was
-# clean before. Review the report after each pass rather than assuming a
-# pass converges to zero; a small residual (e.g. a sub-2-ha lake sitting
-# right at the edge of the 98% "acceptable" band) may be worth leaving as
+# second/third pass after reviewing residual flags — accumulates across
+# passes, never delete cache_dir/lake_corrected/ between them. Some
+# densely-lake-packed clusters can show a whack-a-mole pattern across
+# passes; see workflow/CAM/README.md's "Lake-bisection fix" section for
+# the confirmed cases and why a small residual may be worth leaving as
 # manual-review-only rather than chasing with another pass.
 # =============================================================================
 

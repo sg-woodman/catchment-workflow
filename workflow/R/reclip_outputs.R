@@ -12,9 +12,12 @@
 #     rasters are loaded from each site's group cache directory. Flowlines
 #     (streams_clipped.gpkg) are also generated.
 #
-#   Lake projects:  pass cache_dir (project-level flat cache from
-#     02_prepare_oih_dem.R). Source rasters (dem, flow_pointer, flow_accum,
-#     streams) are loaded from there. No flowlines step for lake projects.
+#   Lake projects:  pass cache_dir (project-level flat cache — the retired
+#     lake pipeline's own 02_prepare_oih_dem.R originally, engine/
+#     02_prepare_terrain.R with "whole_domain" grouping now; same file
+#     names either way). Source rasters (dem, flow_pointer, flow_accum,
+#     streams) are loaded from there via load_lake_cache_rasters(). No
+#     flowlines step for lake projects.
 #
 # Outputs (per site, written to output_dir/<site_id>/):
 #   *_clipped.tif          : dem, flow_pointer, flow_accum, streams
@@ -75,8 +78,40 @@ reclip_outputs <- function(
   }) |>
     dplyr::bind_rows()
 
-  failed <- dplyr::filter(results, status != "success")
+  # "failed: ..." (an error reclip_site()'s own tryCatch actually caught)
+  # is distinct from "skipped (...)" (a legitimate, expected non-error
+  # outcome — no matching geometry, site not in this group, etc.) — only
+  # the former can indicate a structural bug.
+  failed <- dplyr::filter(results, grepl("^failed:", status))
+
   if (nrow(failed) > 0) {
+    distinct_errors <- unique(failed$status)
+
+    # A structural bug (missing function, missing shared dependency) fails
+    # every site the SAME way, not a per-site data issue — that's exactly
+    # how a lake project's reclip stage once silently no-op'd for every
+    # site in a real run (a referenced helper function was undefined;
+    # see the relevant project's README for the fuller trail): every site
+    # produced an identical "failed: could not find function..." row, each
+    # individually just a cw_warn(), with nothing checking results$status
+    # before later stages ran anyway. Abort loudly HERE instead — once,
+    # immediately, with the actual error — rather than let it ride
+    # silently to the end of a multi-hour run disguised as routine
+    # per-site warnings.
+    is_systemic <- length(distinct_errors) == 1 || nrow(failed) / nrow(results) > 0.5
+    if (is_systemic) {
+      cw_abort(glue::glue(
+        "{nrow(failed)} of {nrow(results)} site(s) failed re-clipping, ",
+        "{if (length(distinct_errors) == 1) 'all with the SAME error' else 'mostly with the same error'} ",
+        "— this looks like a structural bug (missing function/dependency), ",
+        "not per-site data issues. Not continuing to Stage 6/7 on top of a ",
+        "reclip that didn't actually run.\n",
+        "First error: {distinct_errors[1]}\n",
+        "Affected site(s): {paste(head(failed$site_id, 10), collapse = ', ')}",
+        "{if (nrow(failed) > 10) glue::glue(' (+{nrow(failed) - 10} more)') else ''}"
+      ))
+    }
+
     cw_warn(glue::glue(
       "{nrow(failed)} site(s) failed:\n",
       "{paste(failed$site_id, ':', failed$status, collapse = '\n')}"
@@ -126,6 +161,48 @@ resolve_catchments_input <- function(catchments, output_dir) {
   # projects; lake projects (EPSG:3161) are handled by terra ops internally,
   # but we need a consistent CRS here for sf-based flowline clipping.
   sf::st_transform(catchment_sf, 3979)
+}
+
+# -- Lake project raster loading -----------------------------------------------
+
+#' Load a lake project's project-level cached rasters for re-clipping
+#'
+#' Was called by reclip_site()'s lake branch but was, at one point, never
+#' defined anywhere in the repo — every call raised "could not find
+#' function 'load_lake_cache_rasters'", caught by reclip_site()'s own
+#' tryCatch and downgraded to a per-site warning rather than an abort, so
+#' reclip_outputs() "succeeded" while silently clipping zero rasters for
+#' every lake project site, every run (see the relevant project's README
+#' for the fuller trail of how this was found and fixed). Exactly 4
+#' rasters, not 6 — matches this file's own header comment ("dem,
+#' flow_pointer, flow_accum, streams... + dem_breached, hillshade for
+#' stream projects" — i.e. NOT for lake projects), and matches what the
+#' retired pre-engine lake pipeline actually produced (dem_clipped.tif,
+#' flow_pointer_clipped.tif, flow_accum_clipped.tif, streams_clipped.tif;
+#' never dem_breached_clipped.tif or hillshade_clipped.tif).
+#'
+#' @param cache_dir Character. Project-level (flat, not per-group) cache
+#'   directory for a lake project.
+#' @return Named list of 4 SpatRasters: dem, flow_pointer, flow_accum,
+#'   streams.
+load_lake_cache_rasters <- function(cache_dir) {
+  raster_files <- list(
+    dem = fs::path(cache_dir, "dem.tif"),
+    flow_pointer = fs::path(cache_dir, "flow_pointer.tif"),
+    flow_accum = fs::path(cache_dir, "flow_accum.tif"),
+    streams = fs::path(cache_dir, "streams.tif")
+  )
+
+  missing <- purrr::keep(raster_files, function(p) !cache_exists(p))
+  if (length(missing) > 0) {
+    cw_abort(glue::glue(
+      "Lake project cache missing required raster(s): ",
+      "{paste(names(missing), collapse = ', ')} (looked in {cache_dir}). ",
+      "Run terrain prep first."
+    ))
+  }
+
+  purrr::map(raster_files, terra::rast)
 }
 
 # -- Single-site re-clip -------------------------------------------------------

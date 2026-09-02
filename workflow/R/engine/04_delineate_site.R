@@ -177,13 +177,32 @@ delineate_engine_point_site <- function(
 
       # Only clip NHN flowlines if the group actually has burned-in
       # flowlines cached (e.g. streams_burn$source != "none") — whole_domain/
-      # OIH-style runs with no burn-in have nothing to clip here.
+      # pre-conditioned-terrain runs with no burn-in have nothing to clip
+      # here. That's a silent, expected skip for a group with
+      # burn_streams = FALSE by design — but if burn_streams IS TRUE for this
+      # site's group and flowlines.gpkg still isn't there, that's not
+      # "nothing to clip," it's Stage 2's streams-burn step having failed
+      # to produce it, and streams.gpkg silently never gets written with
+      # no trace at all (found 2026-08-31 — engine/03_prepare_streams_
+      # burn.R used to compute flowlines in-memory and hand them straight
+      # to burn_streams_into_dem() without ever persisting flowlines.gpkg,
+      # so this branch always took the silent-skip path for every engine
+      # project; fixed there, but this guard had no warning of its own to
+      # catch a *future* instance of the same shape). Warn once per such
+      # site rather than staying silent.
       flowlines_path <- fs::path(grp_cache, "flowlines.gpkg")
       if (cache_exists(flowlines_path)) {
         clip_flowlines_to_catchment(
           catchment_sf = catchment_sf, flowlines_path = flowlines_path,
           site_dir = site_dir, site_id = sid
         )
+      } else if (isTRUE(site$burn_streams[1])) {
+        cw_warn(glue::glue(
+          "Site '{sid}': group '{site$group_id[1]}' has burn_streams = TRUE ",
+          "but {flowlines_path} doesn't exist — streams.gpkg will NOT be ",
+          "written for this site. Check Stage 2's streams-burn step for ",
+          "this group."
+        ))
       }
 
       tibble::tibble(

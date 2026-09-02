@@ -3,53 +3,16 @@
 # Top-level runner for the CAM lake catchment delineation workflow, on the
 # modular engine (workflow/R/engine/) — the standard approach for every
 # project in this repo now. Supersedes an earlier, non-modular run on
-# workflow/R/lake/'s own pipeline (retired — see git history), after
-# validation: delineated catchments compared directly against that
-# production run, 45/45 sites, IoU = 1.0000 and 0% area difference on
-# every site (exact geometric match — OIH needs no breach step, so this
-# migration avoided the MRDEM-breach nondeterminism CELESTE's own
-# migration had to work through), and hydroweight canlcc values matched
-# to within ~0.1% (normal raster-resampling noise).
+# workflow/R/lake/'s own pipeline (retired — see git history). See
+# workflow/CAM/README.md's "CAM lakes" section for the validation results
+# that confirmed this migration (IoU, area/hydroweight comparisons), which
+# workflow/R/lake/*.R functions carried over completely unmodified, and the
+# one real naming gap (d8_pntr.tif vs. flow_pointer.tif) that needed a
+# symlink alias rather than a code change.
 #
 # For correcting a single bad lake catchment: edit
 # output/<site_id>/lake_pourpoint.tif in QGIS, then use
-# rerun_engine_lake_site_watershed() (workflow/R/engine/99_rerun_sites) —
-# same tool the old pipeline's rerun_watershed_lake() provided, ported to
-# the engine before this pipeline was retired specifically so that
-# capability wasn't lost.
-#
-# WHY THIS WORKS WITH SO LITTLE NEW CODE: the engine's lake-polygon
-# delineation path already existed (workflow/R/engine/04_delineate_site.R's
-# delineate_engine_lake_site(), adapted line-for-line from the old
-# lake/03_delineate_lakes.R's delineate_single_lake() when the engine was
-# first built) but had never actually been run before this. Terrain prep
-# needed no new code either — workflow/CAM/run_cam_streams.R already runs
-# OIH's Enhanced Flow Direction through engine/02_prepare_terrain.R's
-# recode+accumulate+extract-streams path, identical physical data this
-# project uses. So this runner was mostly wiring together already-built,
-# already-proven pieces:
-#
-#   Stage 1 (match_lake_polygons) and Stage 4/6/7 (remove_upstream_lake_
-#   catchments, calculate_catchment_metrics, calculate_hydroweight_
-#   attributes) are workflow/R/lake/*.R functions, REUSED COMPLETELY
-#   UNMODIFIED — none of them have any real dependency on which pipeline
-#   produced their inputs, confirmed by reading each one's actual file
-#   dependencies (not assumed):
-#     - match_lake_polygons(): pure spatial/name matching, no cache_dir
-#       dependency at all.
-#     - calculate_hydroweight_attributes(): defaults to cache_dir/
-#       dem_breached.tif + cache_dir/flow_accum.tif — BOTH already
-#       materialized by engine/02_prepare_terrain.R (dem_breached.tif via
-#       alias_dem_breached(), since OIH needs no real breaching — same
-#       mechanism run_cam_streams.R already relies on). No d8_pntr.tif
-#       dependency found in this file.
-#     - remove_upstream_lake_catchments(): the ONE real gap — hardcodes
-#       cache_dir/d8_pntr.tif (the old pipeline's own naming), but the
-#       engine's terrain prep writes flow_pointer.tif instead. Fixed with
-#       a cheap symlink alias right after Stage 2 — same pattern
-#       engine/02_prepare_terrain.R's own alias_dem_breached() already
-#       establishes for an analogous naming gap — rather than modifying
-#       the shared function itself.
+# rerun_engine_lake_site_watershed() (workflow/R/engine/99_rerun_sites).
 #
 # WORKFLOW STAGES:
 #   Stage 1 — Match lake sites to OHN waterbody polygons
@@ -122,8 +85,9 @@ STREAM_THRESHOLD     <- 100   # flow accum threshold for stream extraction (cell
 MIN_UPSTREAM_AREA_M2 <- 10000 # minimum upstream lake area to include (m2, 1 ha)
 
 # =============================================================================
-# SITE DEFINITIONS — identical to workflow/run_cam_lakes.R (production);
-# this is project data, not pipeline-specific, so it's unchanged here.
+# SITE DEFINITIONS — identical to the retired pre-engine lake pipeline's
+# own site list; this is project data, not pipeline-specific, so it carried
+# over unchanged during the migration described above.
 # =============================================================================
 
 cam_sites_raw <- tibble::tribble(
@@ -345,7 +309,7 @@ print(metrics)
 # =============================================================================
 # STAGE 7 — Distance-weighted catchment attributes (hydroweight)
 # =============================================================================
-# Same LOIs as production run_cam_lakes.R: canlcc (land cover) and ndvi.
+# LOIs: canlcc (land cover) and ndvi.
 
 CANLCC_PATH <- "/Users/sam/Documents/cfs/shared_data/raw/landcover/CAN_LLC_2020.tif"
 

@@ -18,10 +18,9 @@
 #      "whole_domain", the default)?
 #   5. Source this file or run sections interactively in R
 #
-# See workflow/CAM/run_cam_streams.R for a filled-in example (OIH DEM,
-# point pour points, whole_domain grouping) and
-# /Users/sam/.claude/plans/i-need-to-run-golden-nova.md for the full
-# engine design writeup.
+# See an existing project's own runner under workflow/<PROJECT>/ for a
+# filled-in example (e.g. a pre-conditioned flow direction source, point
+# pour points, whole_domain grouping).
 #
 # WORKFLOW STAGES:
 #   Stage 1 — Resolve config, build group manifest
@@ -50,7 +49,7 @@
 # cheap, and a changed site's shape can change which OTHER sites it's
 # nested within), reclip, metrics, and hydroweight for just the affected
 # sites, MERGED into the existing combined outputs rather than overwritten
-# wholesale. See workflow/CAM/run_cam_streams.R's header for a filled-in
+# wholesale. See an existing project's own runner header for a filled-in
 # example.
 # =============================================================================
 
@@ -90,11 +89,12 @@ source(here("workflow/R/engine/99_rerun_sites")) # rerun_engine_site_watershed()
 # CONFIGURATION — fill in every TODO before running
 # =============================================================================
 
-PROJECT_ID  <- "TODO" # e.g. "CAM"
+PROJECT_ID  <- "TODO" # e.g. "MYPROJECT"
 DELINEATION <- "TODO" # e.g. "stream_delineation" — only needed if this
 # project has more than one delineation approach sharing PROJECT_ID
 # (otherwise just fold this into output_dir/cache_dir directly, no
-# DELINEATION subfolder needed — see workflow/CELESTE/run_celeste.R)
+# DELINEATION subfolder needed — see an existing project whose runner
+# uses only one delineation approach)
 
 output_dir <- here("output", PROJECT_ID, DELINEATION)
 cache_dir  <- here("cache", PROJECT_ID, DELINEATION)
@@ -286,10 +286,11 @@ print(metrics)
 # attributes.R). $path prepares ONE shared SpatRaster up front and reuses
 # that SAME object across every site x version job, each job's crop()/
 # mask() operating on the FULL raster extent every time before narrowing
-# down — confirmed in practice (CAM streams) to eventually crash with a
-# terra "[readStart] file does not exist" error partway through a many-job
-# run (a temp-file GC race from heavy repeated crop/mask churn on a
-# long-lived shared object). $path_lazy avoids this structurally: each
+# down — confirmed in practice, on a real engine-based project, to
+# eventually crash with a terra "[readStart] file does not exist" error
+# partway through a many-job run (a temp-file GC race from heavy repeated
+# crop/mask churn on a long-lived shared object). $path_lazy avoids this
+# structurally: each
 # site's LOI is pre-cropped down to just its own catchment ONCE, cached to
 # a real per-site file, before any further processing touches it — much
 # less data movement per job, no long-lived shared object. Reach for
@@ -298,8 +299,8 @@ print(metrics)
 #
 # Each LOI's actual prep (source data, mosaicking/reprojection/
 # rasterization, etc.) belongs in its own workflow/<PROJECT>/prepare_*.R
-# script, not here — see workflow/CELESTE/prepare_ndvi.R etc. for the
-# established pattern, and workflow/raster_attributes.R for reusable
+# script, not here — see an existing project's own prepare_*.R scripts for
+# the established pattern, and workflow/raster_attributes.R for reusable
 # generic helpers (reclassify_categorical(), sens_slope_trend(),
 # build_mosaic_vrt(), rasterize_competing_classes()).
 

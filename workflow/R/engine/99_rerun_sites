@@ -22,8 +22,8 @@
 # scoped to just the affected sites, not the whole project, and MERGED into
 # the existing combined outputs (catchment_metrics.csv, the hydroweight
 # CSV) rather than overwriting them wholesale, since those writers
-# (write_metrics_outputs(), the write_csv() call in run_cam_streams.R) do a
-# plain overwrite with whatever `sites` subset they're given.
+# (write_metrics_outputs(), and a project runner's own write_csv() call) do
+# a plain overwrite with whatever `sites` subset they're given.
 #
 # remove_upstream_catchments() always runs against the FULL sites list
 # (cheap — pure vector geometry, no raster I/O) since a changed site's
@@ -48,7 +48,8 @@
 # flow_pointer_override_path = <corrected pointer>) — same "re-trace from
 # the existing snapped point" contract, just against a lake-flattened,
 # re-derived D8 pointer (prepare_lake_corrected_flow_pointer()) instead of
-# the group's own flow_pointer.tif. See workflow/CAM/fix_lake_bisection.R.
+# the group's own flow_pointer.tif. See the relevant project's own
+# fix_lake_bisection.R.
 #
 # Requires already sourced: workflow/R/utils.R, code/reset_workflow.R
 # (reset_site()), workflow/R/stream/delineate_sites.R (load_group_
@@ -417,10 +418,11 @@ rerun_engine_sites <- function(
 
   # -- Rebuild the combined all_catchments.gpkg -------------------------------
   # Each site's own catchment.gpkg is now current, but the COMBINED file
-  # (built once in run_cam_streams.R's Stage 3, never touched again there)
-  # isn't updated by anything above — confirmed stale after a rerun without
-  # this: it kept the target site's ORIGINAL catchment (e.g. a mis-snapped
-  # 1-cell Bell) even after a correct rerun updated catchment.gpkg itself.
+  # (built once in the project runner's own Stage 3, never touched again
+  # there) isn't updated by anything above — confirmed stale after a rerun
+  # without this: it kept the target site's ORIGINAL catchment (e.g. a
+  # mis-snapped 1-cell catchment) even after a correct rerun updated
+  # catchment.gpkg itself.
   # all_catchments_clipped.gpkg doesn't need the same treatment — it's
   # already rebuilt every time inside remove_upstream_catchments() below.
   combine_all_catchments(sites, output_dir)
@@ -495,7 +497,7 @@ rerun_engine_sites <- function(
 #' Rebuild the combined all_catchments.gpkg from every site's own
 #' catchment.gpkg
 #'
-#' Mirrors the inline logic in run_cam_streams.R's Stage 3 — needed here
+#' Mirrors the inline logic in a project runner's own Stage 3 — needed here
 #' too, since rerun_engine_sites() only writes/updates individual sites'
 #' catchment.gpkg, never the combined file, on its own.
 #'

@@ -2,62 +2,29 @@
 # =============================================================================
 # Corrects CELESTE catchments that bisect a lake — the boundary cuts through
 # a lake polygon instead of fully containing it or fully excluding it, which
-# is hydrologically impossible. Same root cause and same fix as the CAM
-# streams version (workflow/CAM/fix_lake_bisection.R, workflow/R/
-# lake_containment.R's header) — point-based delineation has zero lake
-# awareness, so nothing guarantees a lake a site's flow path happens to
-# cross is flow-consistent under raw D8.
+# is hydrologically impossible. Same root cause as the CAM streams version
+# (workflow/CAM/fix_lake_bisection.R, workflow/R/lake_containment.R's
+# header). Since superseded as the primary fix by upfront lake conditioning
+# (run_celeste.R's lake_conditioning config) — this reactive path stays as
+# a fallback for any residual after that runs. See workflow/CELESTE/
+# README.md's "Reactive lake-bisection fix" section for the full scan
+# results and the two structural differences from the CAM streams version
+# of this fix (NHN as the per-group lake source, and why this file doesn't
+# reuse stream/burn_streams.R's read_merge_nhn_layer()).
 #
-# Confirmed via a full systematic scan (this session): 31 (site, lake)
-# pairs across 27 of 132 sites, in 5 of 6 HydroBasins groups (COC, KEN,
-# NBE, NIP, TUR — MOR's 2 sites are clean). Matches and exceeds a set of 12
-# sites spotted manually in QGIS beforehand (11 confirmed genuine;
-# BLOXHAM1_1K_1 checks out clean — likely conflated with the genuinely
-# bisected BLOXHAM1_10K_1).
-#
-# TWO STRUCTURAL DIFFERENCES FROM CAM STREAMS, both handled here rather
-# than by changing the shared workflow/R/lake_containment.R machinery:
-#
-#   1. Lake source is NHN (NHN_HD_WATERBODY_2), read per-HydroBasins-group
-#      from local GDBs, not one province-wide file like OHN. See
-#      fetch_nhn_lakes_for_group() below.
-#
-#      IMPORTANT: this deliberately does NOT reuse stream/burn_streams.R's
-#      read_merge_nhn_layer() — that function clips each waterbody's
-#      geometry to its query AOI, correct for its original job (trimming
-#      burn-in streams to a group's conditioning extent) but wrong here:
-#      it distorts the containment percentage this check depends on.
-#      Confirmed directly during scoping: BLOXHAM1_1K_1 read as 0.17%
-#      outside with a tight per-site AOI and 7.3% with a larger group-wide
-#      AOI, off the SAME lake, purely because of how much of it each AOI
-#      happened to clip off. This file uses read_nhn_from_gdb() directly
-#      instead (already reads+reprojects with NO clipping) and only uses
-#      the AOI for a non-destructive sf::st_filter() row subset, exactly
-#      matching how the CAM version filters OHN.
-#
-#   2. Terrain tier is raw MRDEM + per-group breach, with NHN streams
-#      burned in BEFORE breaching for 5 of 6 groups (dem_burned.tif exists
-#      for KEN/MOR/NBE/NIP/TUR — exactly the 5 groups with confirmed
-#      bisections; COC has burn_streams = FALSE per run_celeste.R's own
-#      override and only has dem.tif). prepare_lake_corrected_flow_pointer()
-#      (workflow/R/lake_containment.R) already auto-detects dem_burned.tif
-#      over dem.tif for exactly this reason — no CELESTE-specific change
-#      needed there.
-#
-#   A third, purely mechanical difference: a batch of site_ids to correct
-#   can span MULTIPLE HydroBasins groups at once, each with its own D8
-#   pointer grid, whereas rerun_engine_sites(flow_pointer_override_path = ...)
-#   takes exactly one pointer per call. Handled by looping per group in
-#   correct_lake_bisected_sites_celeste() below — workflow/R/engine/
-#   99_rerun_sites is NOT modified further; it's already correct per
-#   individual call.
+# One purely mechanical difference from the CAM version worth knowing to
+# read the code below: a batch of site_ids to correct can span MULTIPLE
+# HydroBasins groups at once, each with its own D8 pointer grid, whereas
+# rerun_engine_sites(flow_pointer_override_path = ...) takes exactly one
+# pointer per call. Handled by looping per group in
+# correct_lake_bisected_sites_celeste() below.
 #
 # WORKFLOW: same manually-gated pattern as CAM streams — sourcing this file
 # only validates and reports, never corrects on its own.
 #
 #   1. source(here::here("workflow/CELESTE/run_celeste.R"))     # sites, group_manifest, config, output_dir, cache_dir, loi_layers
 #   2. source(here::here("workflow/CELESTE/fix_lake_bisection.R")) # runs validate_catchment_lake_intersections_by_group(), prints/writes the report, defines correct_lake_bisected_sites_celeste() -- corrects NOTHING yet
-#   3. Review output/CELESTE_engine/lake_intersection_report.csv AND the
+#   3. Review output/CELESTE/lake_intersection_report.csv AND the
 #      catchments in QGIS against NHN waterbodies.
 #   4. correct_lake_bisected_sites_celeste(
 #        site_ids = c("CF1", "SN1UP"),   # can span multiple groups

@@ -11,8 +11,9 @@
 #      exclude from the LOI summary.
 #   2. dem/flow_accum are resolved PER SITE from that site's group cache
 #      (cache/<PROJECT_ID>/<group_id>/), not a single project-wide raster —
-#      CELESTE groups span separate HydroBasins regions, each with its own
-#      DEM, unlike CAM's single contiguous lake project.
+#      a HydroBasins-grouped project's groups span separate regions, each
+#      with its own DEM, unlike a whole-domain project's single contiguous
+#      raster set.
 #   3. Attributes are computed for BOTH catchment versions — the unclipped
 #      catchment (catchment.gpkg / streams.tif from delineate_sites.R)
 #      and the upstream-removed catchment (catchment_clipped.gpkg /
@@ -24,7 +25,7 @@
 # lake module, PLUS a `path_template` field (containing a literal "{site_id}"
 # placeholder) for LOI layers that are already provided as one pre-clipped
 # raster per site rather than a single project-wide raster — e.g.
-# "data/celeste_loi/ndvi_trend/{site_id}.tif". A per-site raster only needs
+# "data/<project>_loi/ndvi_trend/{site_id}.tif". A per-site raster only needs
 # to cover the UNCLIPPED catchment extent; the clipped-version pass crops/
 # masks it down further, so one file per site serves both versions. Exactly
 # one of `path` / `path_template` must be set per layer.
@@ -362,8 +363,9 @@ prepare_one_loi_raster <- function(
       # coverage (e.g. NDVI built for a different site set than the one
       # actually being run) makes terra::crop() throw a hard "extents do
       # not overlap" error, not just return an empty/NA raster — confirmed
-      # directly (CAM streams' SUD22, ~8 km outside the NDVI extent).
-      # Checked explicitly here, before cropping, so a genuine no-coverage
+      # directly on a real site several km outside the source's extent
+      # (see the relevant project's README). Checked explicitly here,
+      # before cropping, so a genuine no-coverage
       # site is skipped gracefully — same "return NULL, let the caller's
       # existing NULL-handling drop this LOI for this site" pattern
       # resolve_site_loi_raster() already uses for a missing source file —

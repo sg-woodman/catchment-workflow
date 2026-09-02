@@ -1,18 +1,19 @@
 # 01_build_group_manifest.R
 # ---------------------------------------------------------------------------
 # Builds the group_manifest for an engine run, per config$grouping$strategy.
-# Every run produces the SAME manifest shape CELESTE already relies on
-# (group_id, aoi, cache_dir, n_sites, burn_streams) regardless of strategy —
-# downstream modules (terrain prep, streams-burn, delineation, hydroweight)
-# never special-case which strategy produced the manifest they're reading.
+# Every run produces the SAME manifest shape every reused stream-project
+# module already relies on (group_id, aoi, cache_dir, n_sites,
+# burn_streams) regardless of strategy — downstream modules (terrain prep,
+# streams-burn, delineation, hydroweight) never special-case which strategy
+# produced the manifest they're reading.
 #
 # Strategies:
-#   "whole_domain" — the trivial case, formalizing what CAM lakes already
-#     does today (one flat project-wide raster set, no AOI cropping at
-#     all). One row: group_id = project_id, aoi = the full extent of
-#     whichever terrain input was resolved in 00_resolve_config.R,
-#     cache_dir = config$cache_dir itself (no per-group subfolder — matches
-#     the lake pipeline's existing flat cache_dir convention).
+#   "whole_domain" — the trivial case: one flat project-wide raster set,
+#     no AOI cropping at all. One row: group_id = project_id, aoi = the
+#     full extent of whichever terrain input was resolved in
+#     00_resolve_config.R, cache_dir = config$cache_dir itself (no
+#     per-group subfolder — matches the flat cache_dir convention a
+#     whole-domain project uses throughout).
 #   "hydrobasins" — delegates directly to the existing, unmodified
 #     workflow/R/stream/group_sites.R::build_group_manifest() /
 #     workflow/R/utils.R::build_group_aoi() (HydroBasins level-6 union per
@@ -29,7 +30,7 @@
 #' strategy implies them (whole_domain), then runs the same
 #' validate_sites_tibble() check every reused stream-module function
 #' expects, so config$sites is fully interchangeable with what those
-#' functions already receive from CELESTE.
+#' functions already receive from a hydrobasins-grouped project.
 #'
 #' @param config Resolved config from resolve_engine_config()
 #' @return A list with `sites` (validated tibble, group_id/burn_streams
@@ -76,8 +77,8 @@ build_engine_group_manifest <- function(config) {
   }
 
   # -- "hydrobasins" strategy — delegate to the existing, unmodified
-  # CELESTE machinery. Requires workflow/R/stream/group_sites.R already
-  # sourced (defines build_group_manifest()).
+  # HydroBasins grouping machinery. Requires workflow/R/stream/group_sites.R
+  # already sourced (defines build_group_manifest()).
   if (!exists("build_group_manifest", mode = "function")) {
     cw_abort(paste(
       "grouping$strategy = 'hydrobasins' requires",
@@ -89,8 +90,8 @@ build_engine_group_manifest <- function(config) {
   # build_group_manifest()/build_group_aoi() (workflow/R/utils.R) hardcode
   # EPSG:3979 for the AOI they construct — not generalized to an arbitrary
   # working_crs. Fine when config$working_crs resolved to 3979 anyway (the
-  # normal case: hydrobasins grouping is meant for a national mosaic like
-  # MRDEM, itself natively 3979), but a mismatch here would silently tag
+  # normal case: hydrobasins grouping is meant for a national terrain
+  # mosaic natively in that CRS), but a mismatch here would silently tag
   # every group's AOI with the wrong CRS.
   if (!identical(config$working_crs, "EPSG:3979")) {
     cw_warn(glue::glue(

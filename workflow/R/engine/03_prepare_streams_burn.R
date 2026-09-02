@@ -81,6 +81,31 @@ resolve_streams_burn <- function(config, aoi, dem_path, dem_burned_path, group_i
     return(invisible(NULL))
   }
 
+  # Persist to the group cache, mirroring stream/burn_streams.R's
+  # prepare_nhn_layers() (old pipeline) — required so that
+  # engine/04_delineate_site.R's clip_flowlines_to_catchment() (guarded on
+  # cache_exists(flowlines_path)) can write each site's own streams.gpkg.
+  # Found missing entirely: this function used to compute flowlines
+  # in-memory and hand them straight to burn_streams_into_dem() without
+  # ever writing them to disk, so every engine-based raw-dem project
+  # silently never produced a per-site streams.gpkg — no warning,
+  # since 04_delineate_site.R's guard just skips the call when the path
+  # doesn't exist. dem_path's directory is the group's cache_dir (the
+  # caller always passes grp_cache/dem.tif — see 02_prepare_terrain.R's
+  # prepare_raw_dem_tier()). Deliberately flowlines only, not a
+  # waterbodies.gpkg companion — the old pipeline's waterbodies.gpkg was
+  # unused downstream by anything the engine relies on (lake-bisection
+  # checking does its own on-the-fly NHN fetch, not a persisted group
+  # file), and fetching it unconditionally here would add real runtime to
+  # every group's terrain prep for no consumer.
+  flowlines_path <- fs::path(fs::path_dir(dem_path), "flowlines.gpkg")
+  if (!cache_exists(flowlines_path)) {
+    sf::st_write(flowlines, flowlines_path, delete_dsn = TRUE, quiet = TRUE)
+    cw_inform(glue::glue(
+      "Group '{group_id}': flowlines.gpkg written ({nrow(flowlines)} feature(s))."
+    ))
+  }
+
   burn_streams_into_dem(
     flowlines       = flowlines,
     dem_path        = dem_path,

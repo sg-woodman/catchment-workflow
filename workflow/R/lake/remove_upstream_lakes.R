@@ -165,14 +165,14 @@ remove_upstream_lake_catchments <- function(
     terra::vect(p) |> terra::project(terra::crs(d8_template))
   }) |> purrr::compact()
 
-  # Remove upstream catchments whose catchment_id (OGF_ID) matches a CAM
+  # Remove upstream catchments whose catchment_id (OGF_ID) matches a
   # target site polygon. Without this, a target lake found as "upstream" of a
   # neighbouring site gets cached with its OGF_ID as catchment_id, then
   # appears in `others` during Step 3 and erases the site from itself.
-  cam_ogf_ids_char <- as.character(polys_all$OGF_ID)
+  target_ogf_ids_char <- as.character(polys_all$OGF_ID)
   upstream_pool <- purrr::keep(
     upstream_pool,
-    function(v) !v$catchment_id[1] %in% cam_ogf_ids_char
+    function(v) !v$catchment_id[1] %in% target_ogf_ids_char
   )
 
   if (length(target_pool) == 0) {

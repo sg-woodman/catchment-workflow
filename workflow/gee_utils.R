@@ -29,8 +29,8 @@
 #   1. prepare_polygons_for_gee() — filter and/or split a polygon layer
 #      (sf or terra SpatVector) into the group(s) you actually want to
 #      upload, by any id/group column already on it (join on whatever
-#      project-specific metadata you need BEFORE calling this — see
-#      workflow/CAM/upload_catchments_to_gee.R for a worked example).
+#      project-specific metadata you need BEFORE calling this — see a
+#      calling project's own upload_catchments_to_gee.R for a worked example).
 #   2. write_polygon_groups() — OPTIONAL. Write the result(s) of step 1 to
 #      local vector files, if you want to inspect/QA a group before
 #      uploading, or need shapefiles for something else.
@@ -123,8 +123,9 @@ gee_init <- function(user = NULL, project, gcs = FALSE) {
 #' a fixed set of site lists baked into the script. To group by metadata
 #' that ISN'T already a column on your polygon layer (e.g. a campaign or
 #' watershed label that lives in a separate sites table), join it on
-#' first — see workflow/CAM/upload_catchments_to_gee.R for a worked
-#' example — this function only ever operates on columns already present.
+#' first — see a calling project's own upload_catchments_to_gee.R for a
+#' worked example — this function only ever operates on columns already
+#' present.
 #'
 #' @param polygons  sf object or terra SpatVector, with an identifying
 #'   column (e.g. "site_id") and, if grouping by attribute, a grouping
@@ -246,7 +247,7 @@ group_polygons_by_adjacency <- function(polygons, id_col = "site_id", snap_toler
   }
 
   n <- nrow(sf_polygons)
-  # st_make_valid() defensively — confirmed directly against real CAM
+  # st_make_valid() defensively — confirmed directly against real
   # catchment output that a clipped (upstream-erased) polygon can come out
   # geometrically invalid (self-intersection from the erase operation),
   # which risks unpredictable GEOS topology results downstream.
