@@ -265,12 +265,38 @@ reclip_site <- function(
         grp_cache <- grp_manifest$cache_dir
         group_rasters <- load_group_rasters(grp_cache, grp)
 
-        clip_flowlines_to_catchment_clipped(
-          catchment_sf   = focal,
-          flowlines_path = fs::path(grp_cache, "flowlines.gpkg"),
-          site_dir       = site_dir,
-          site_id        = site_id
-        )
+        # Only re-clip NHN flowlines if this group actually has burned-in
+        # flowlines cached — same condition engine/04_delineate_site.R's
+        # delineate_engine_point_site() and 99_rerun_sites's
+        # rerun_engine_site_watershed() both already use (see either
+        # file's own comment). This function was missing that guard: it
+        # unconditionally called clip_flowlines_to_catchment_clipped(),
+        # which for a no-burn-in project (streams_burn = "none" — CAM
+        # streams, EMILY_TURKEY) falls into its own "flowlines.gpkg not
+        # found" branch and writes an EMPTY streams_clipped.gpkg for
+        # every site regardless. That empty file still EXISTS on disk, so
+        # catchment_metrics.R's compute_site_metrics() auto-detection
+        # (which prefers a per-site streams_clipped.gpkg over streams_
+        # clipped.tif whenever the .gpkg merely exists, not checking
+        # feature count) picked the empty vector over the real, non-empty
+        # stream raster sitting right next to it — silently discarding a
+        # perfectly good drainage_density_km_km2/stream_frequency_per_km2
+        # for every "clipped" row. Confirmed on real data: 100% of
+        # clipped-version rows NA for both EMILY_TURKEY (68/68) and CAM
+        # streams (8/8), while their streams_clipped.tif had real,
+        # non-zero stream cells the whole time. CELESTE (real NHN
+        # burn-in) was unaffected — its streams_clipped.gpkg genuinely
+        # has features wherever a real flowline exists, so the vector-
+        # preferred design there is correct, not the bug.
+        flowlines_path <- fs::path(grp_cache, "flowlines.gpkg")
+        if (cache_exists(flowlines_path)) {
+          clip_flowlines_to_catchment_clipped(
+            catchment_sf   = focal,
+            flowlines_path = flowlines_path,
+            site_dir       = site_dir,
+            site_id        = site_id
+          )
+        }
       } else {
         # -- Lake path: load rasters from project-level cache ----------------
         group_rasters <- load_lake_cache_rasters(cache_dir)

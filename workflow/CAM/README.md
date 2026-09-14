@@ -327,6 +327,41 @@ hardening this prompted across every project). Backfilled via
 "clipped" version was silently missing its stream-based weighting
 schemes for the same reason), skipping the unaffected Stage 1–4 outputs.
 
+## The "clipped" drainage_density/stream_frequency-always-NA bug (found 2026-09-06)
+
+Every "clipped"-version row in `catchment_metrics.csv` had
+`drainage_density_km_km2`/`stream_frequency_per_km2` = `NA` (8/8 rows,
+100%) — not a physical "no stream here," a real bug. Root cause: for the
+`clipped` version, `catchment_metrics.R`'s `compute_site_metrics()`
+auto-detects a per-site stream layer, preferring `streams_clipped.gpkg`
+(vector) over `streams_clipped.tif` (raster) whenever the `.gpkg` merely
+*exists* — it never checks feature count. `workflow/R/reclip_outputs.R`'s
+`reclip_site()` was unconditionally calling
+`clip_flowlines_to_catchment_clipped()` for every stream project,
+regardless of whether the group actually has burned-in NHN flowlines
+cached — unlike the engine's own delineation stage and
+`rerun_engine_sites()`, which both already gate this on
+`cache_exists(flowlines.gpkg)`. CAM streams has no NHN burn-in
+(`streams_burn = list(source = "none")` — OIH terrain only), so that
+missing guard made every site write an **empty** `streams_clipped.gpkg`
+(0 features) regardless — which then won the auto-detect over the real,
+non-empty `streams_clipped.tif` sitting right next to it, discarding
+perfectly good data. Found while investigating the same symptom in
+[[EMILY_TURKEY's own README]] (identical no-burn-in setup, identical
+100%-NA pattern — checked there first, then confirmed CAM streams hits
+it too).
+
+Fixed by gating `reclip_site()`'s flowline-clip call on
+`cache_exists(flowlines.gpkg)` (matching the guard already used
+elsewhere), then deleting the 38 stale empty `streams_clipped.gpkg`
+files (confirmed every single one was 0-feature before deleting — not
+assumed) and rerunning Stage 6 (metrics only; Stage 5's raster outputs
+were never wrong, only the flowlines vector). Verified: 0/8 clipped rows
+NA afterward, all reading real values from `streams_clipped.tif`.
+CELESTE (real NHN burn-in) was never affected by this — its
+`streams_clipped.gpkg` genuinely has features wherever a real flowline
+exists, so its vector-preferred design is correct there, not the bug.
+
 ## Output shapes
 
 `workflow/CAM/tidy_outputs.R`'s `tidy_cam_outputs()` reshapes
