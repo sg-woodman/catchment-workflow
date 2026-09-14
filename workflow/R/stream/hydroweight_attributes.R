@@ -497,7 +497,9 @@ process_hw_site_stream <- function(
   # st_make_valid() defensively — hydroweight::hydroweight() does its own
   # internal GEOS geometry processing (union/buffer/etc. against the clip
   # region) and a self-touching artifact in a raster-to-polygon conversion
-  # upstream (watershed_to_polygon() in delineate_sites.R) is enough to
+  # upstream (watershed_to_polygon(), workflow/R/engine/04_delineate_site.R
+  # — also now validates its own output at the source, but this defensive
+  # read-time guard stays regardless of what wrote the file) is enough to
   # trip a "TopologyException: side location conflict" there even though
   # the polygon reads back fine on its own. Confirmed directly: 3 sites
   # (NBI1/NBI4/NBI5, unclipped version only — the largest unclipped
@@ -506,6 +508,27 @@ process_hw_site_stream <- function(
   # coordinate until this fix was added.
   site_catch_sf <- sf::st_read(catchment_path, quiet = TRUE) |> sf::st_make_valid()
   pour_point_sf <- sf::st_read(pour_point_path, quiet = TRUE)
+
+  # hydroweight::hydroweight() rasterizes EVERY non-geometry column of
+  # target_O onto the DEM grid (process_input() -> terra::rasterize(field
+  # = varname) for each column name), not just the geometry — a behavior
+  # that isn't documented and easy to miss since pour_point.gpkg carries
+  # whatever extra columns the project's own sites tibble had (site_name,
+  # group_id, burn_streams, and here a project-specific location_project/
+  # date_collected pair added for traceability). When one of those columns
+  # is a character column that's ALL-NA for a given site (confirmed: 18
+  # EMILY_TURKEY sites whose source data had no Location/Project value),
+  # terra treats it as a 0-level factor and hydroweight::hydroweight()
+  # crashes deep inside terra's `levels<-`/set.cats() with "arguments
+  # imply differing number of rows: 2, 0" — not caught by this function's
+  # own tryCatch until the OUTER hydroweight() call, so it silently
+  # dropped those sites' entire hydroweight row with no diagnostic beyond
+  # a deferred R warning. Confirmed directly: stripping to just `site_id`
+  # (always present, always non-NA, unique per file) fixes it. CAM
+  # streams/CELESTE never hit this only because their own sites tibbles
+  # happen to carry no NA-eligible extra column through to pour_point.gpkg
+  # — not because they're immune to it.
+  pour_point_sf <- pour_point_sf["site_id"]
 
   hw_site_dir <- fs::path(hw_dir, site_id, version)
   fs::dir_create(hw_site_dir, recurse = TRUE)
@@ -656,7 +679,11 @@ run_loi_attributes_stream <- function(
     ))
   }
 
-  present_id <- if (!loi_numeric) single_class_value(loi_site) else NULL
+  present_id <- if (!loi_numeric) {
+    single_class_value(align_loi_to_distance_weight_grid(loi_site, hw[[1]]))
+  } else {
+    NULL
+  }
 
   if (!is.null(present_id)) {
     attr_tbl <- degenerate_categorical_table(present_id, loi_desc$class_levels, names(hw))
@@ -765,7 +792,11 @@ run_loi_attributes_stream_multilayer <- function(
       return(NULL)
     }
 
-    present_id <- if (!loi_numeric) single_class_value(single) else NULL
+    present_id <- if (!loi_numeric) {
+      single_class_value(align_loi_to_distance_weight_grid(single, hw[[1]]))
+    } else {
+      NULL
+    }
 
     if (!is.null(present_id)) {
       tbl_k <- degenerate_categorical_table(present_id, loi_desc$class_levels, names(hw))
@@ -954,12 +985,71 @@ run_loi_attributes_stream_multilayer_continuous <- function(
 
 # -- Degenerate (single-class) categorical layers -----------------------------
 
+#' Align a categorical LOI raster onto the same grid hydroweight::
+#' hydroweight_attributes() will actually use internally, before checking
+#' for a degenerate (single-class) ROI
+#'
+#' hydroweight_attributes() internally reprojects/resamples (nearest-
+#' neighbor) `loi` onto the FIRST distance-weight raster's grid
+#' (process_input(align_to = distance_weights[[1]], resample_type =
+#' "near")), then re-masks it to a freshly-rasterized ROI on THAT grid — a
+#' different grid/extent than whatever single_class_value() would see
+#' checking the site's own pre-alignment loi_site raster directly (cropped/
+#' masked at the LOI's own native resolution, which needn't share an origin
+#' or cell size with the DEM-derived distance-weight grid). For a small
+#' enough catchment, that resample can make a minority class (present at
+#' loi's own native resolution) vanish entirely, so hydroweight_
+#' attributes() sees only ONE class where our own check saw two or more.
+#'
+#' When that happens, hydroweight_attributes() hits a confirmed (not
+#' documented) package bug: process_input()'s one-hot-encoding step for a
+#' "near"-resampled categorical raster is SKIPPED whenever only one unique
+#' value survives after alignment — it silently passes the raw class-code
+#' value through instead of a binary indicator layer. The categorical
+#' branch then computes `sum(loi * distance_weight) / sum(distance_weight)`
+#' treating that raw code as if it were a continuous quantity — a nonsense
+#' "distance-weighted proportion" equal to the class's raw numeric ID (not
+#' a real 0-1 proportion), under the ambiguous, id-less "Class_{scheme}_
+#' prop" column name documented above clean_categorical_columns_stream(),
+#' which can't parse it. ensure_full_categorical_schema() then zero-fills
+#' every REAL class column for that row (since none of them exist under
+#' the expected name), silently misreporting the site's actual (100%
+#' one-class) land cover as 0% everywhere. Confirmed on real data:
+#' EMILY_TURKEY's BATCH004/HARM002/MIC006/MIC016 each leaked a
+#' "class_lumped_prop" (etc.) column valued 5 — CANLCC class ID 5
+#' (broadleaf_deciduous_forest, its true sole class) — while every real
+#' canlcc_*_prop column for that row read 0.
+#'
+#' Aligning loi onto dw_ref's exact grid before the single-class check
+#' replicates the same resample hydroweight_attributes() performs
+#' internally, so our own degenerate-ROI detection (and its exact,
+#' analytic 1.0/0.0 answer via degenerate_categorical_table()) fires
+#' whenever the package's fallthrough bug would otherwise trigger.
+#'
+#' @param loi    SpatRaster, single categorical layer, already cropped/
+#'   masked to the site's catchment at its own native grid.
+#' @param dw_ref SpatRaster. One of the site's own distance-weight rasters
+#'   (any element of `hw` — all share the same grid, already masked to the
+#'   catchment; callers pass hw[[1]]).
+#' @return SpatRaster: loi resampled ("near") + cropped/masked onto
+#'   dw_ref's grid.
+align_loi_to_distance_weight_grid <- function(loi, dw_ref) {
+  aligned <- if (isTRUE(terra::compareGeom(loi, dw_ref, stopOnError = FALSE))) {
+    loi
+  } else {
+    terra::project(loi, dw_ref, method = "near")
+  }
+  terra::mask(terra::crop(aligned, dw_ref), dw_ref)
+}
+
 #' Check whether a categorical LOI has only one distinct non-NA value
 #'
 #' Common for a sparse categorical time series clipped to a small
 #' catchment — e.g. most years of a harvest/regen record having zero
 #' recorded activity within a given site's catchment, leaving every cell
-#' "other".
+#' "other". Callers checking whether hydroweight_attributes() will hit its
+#' single-value fallthrough (see align_loi_to_distance_weight_grid()'s
+#' docstring) should pass it output, not the raw pre-alignment LOI.
 #'
 #' @param loi SpatRaster, single layer
 #' @return The single present value (numeric), or NULL if 2+ distinct
