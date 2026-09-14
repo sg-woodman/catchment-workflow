@@ -8,10 +8,19 @@
 #   Point mode reuses, verbatim, from workflow/R/stream/delineate_sites.R
 #   (must be sourced first): load_group_rasters(), snap_pour_point(),
 #   delineate_watershed(), clip_rasters_to_catchment(),
-#   clip_flowlines_to_catchment(). Only write_pour_point_shp() and
-#   watershed_to_polygon() hardcode EPSG:3979 there — this file defines
-#   CRS-dynamic replacements (write_pour_point_shp_dynamic(),
-#   watershed_to_polygon_dynamic()) rather than touching the originals.
+#   clip_flowlines_to_catchment(). write_pour_point_shp() and
+#   watershed_to_polygon() below are THIS file's own CRS-dynamic versions,
+#   the ONLY implementation of either now — they were named
+#   write_pour_point_shp_dynamic()/watershed_to_polygon_dynamic() until
+#   2026-09, coexisting with EPSG:3979-hardcoded originals of the plain
+#   base name in stream/delineate_sites.R (kept separate at the time to
+#   avoid touching that "reused unmodified" file). Renamed after those
+#   originals were confirmed to have zero live callers and were removed —
+#   every project runs on the engine, which only ever called the _dynamic
+#   versions, so the "non-dynamic" originals were pure dead code that
+#   could (and did — see git history for the incident) silently diverge
+#   from what any real pipeline actually runs, because a fix applied to
+#   them had no effect on anything.
 #
 #   Lake mode adapts workflow/R/lake/03_delineate_lakes.R's
 #   delineate_single_lake() logic — that file is already CRS-dynamic
@@ -126,7 +135,7 @@ delineate_engine_point_site <- function(
 
   tryCatch(
     {
-      pour_point_shp <- write_pour_point_shp_dynamic(site, site_dir, config$working_crs)
+      pour_point_shp <- write_pour_point_shp(site, site_dir, config$working_crs)
 
       snapped_shp <- snap_pour_point(
         pour_point_shp = pour_point_shp, streams = group_rasters$streams,
@@ -138,7 +147,7 @@ delineate_engine_point_site <- function(
         site_dir = site_dir, site_id = sid
       )
 
-      catchment_sf <- watershed_to_polygon_dynamic(
+      catchment_sf <- watershed_to_polygon(
         watershed_tif = watershed_tif, site_dir = site_dir, site_id = sid,
         working_crs = config$working_crs
       )
@@ -222,11 +231,10 @@ delineate_engine_point_site <- function(
 }
 
 #' Write a single site's pour point as a .shp file, in the run's resolved
-#' working CRS — CRS-dynamic variant of workflow/R/stream/
-#' delineate_sites.R's write_pour_point_shp() (which hardcodes EPSG:3979
-#' to match MRDEM; this variant matches whatever DEM the run was resolved
-#' against instead).
-write_pour_point_shp_dynamic <- function(site, tmp_dir, working_crs) {
+#' working CRS. The sole implementation (see this file's header) — matches
+#' whatever DEM the run was resolved against, rather than hardcoding
+#' EPSG:3979.
+write_pour_point_shp <- function(site, tmp_dir, working_crs) {
   pour_point_shp <- fs::path(tmp_dir, "pour_point.shp")
   sf::st_as_sf(site, coords = c("lon", "lat"), crs = 4326) |>
     sf::st_transform(working_crs) |>
@@ -235,31 +243,59 @@ write_pour_point_shp_dynamic <- function(site, tmp_dir, working_crs) {
 }
 
 #' Convert a watershed raster to a catchment polygon, in the run's resolved
-#' working CRS — CRS-dynamic variant of workflow/R/stream/
-#' delineate_sites.R's watershed_to_polygon().
-watershed_to_polygon_dynamic <- function(watershed_tif, site_dir, site_id, working_crs) {
-  catchment_shp <- fs::path(site_dir, "catchment_tmp.shp")
+#' working CRS. The sole implementation (see this file's header) — matches
+#' whatever DEM the run was resolved against, rather than hardcoding
+#' EPSG:3979.
+#'
+#' Uses terra::as.polygons(dissolve = TRUE) directly on the trimmed
+#' watershed raster, NOT whitebox::wbt_raster_to_vector_polygons() +
+#' sf::st_union() (the previous approach, retired here — see git history).
+#' The two are not equivalent for a watershed whose D8 trace connects into
+#' the pour-point cell only DIAGONALLY (a valid 8-connected flow path):
+#' wbt_raster_to_vector_polygons() groups such a cell into the SAME polygon
+#' feature as the rest of the catchment, producing a single self-touching
+#' ("bowtie") ring at the corner pinch — invalid per OGC rules. The old
+#' code's sf::st_make_valid() call resolves that invalidity, but (confirmed
+#' directly, this GEOS version only supports geos_method = "valid_structure",
+#' no alternative) by silently DROPPING the smaller lobe entirely rather
+#' than preserving it as a separate polygon part, instead of returning a
+#' multi-part but valid geometry. Confirmed on real data: EMILY_TURKEY's
+#' WABO7161/WABO7164 each lost exactly their own pour-point cell this way —
+#' watershed.tif had 28 valid cells, the resulting catchment.gpkg polygon
+#' covered only 27 (24300 m2 vs the correct 25200 m2), and the missing cell
+#' was the pour point's own — leaving it ~25m outside its own catchment
+#' polygon. Silent at delineation time; only surfaced later as an opaque
+#' hydroweight::hydroweight() crash ("[writeRaster] there are no cell
+#' values") when the DEM crop aligned to that undersized polygon didn't
+#' cover the pour point at all. terra::as.polygons(dissolve = TRUE) groups
+#' cells by the same 8-connectivity rule but returns a proper (valid)
+#' MULTIPOLYGON preserving every connected lobe — confirmed directly on
+#' WABO7161's actual watershed.tif: 28/28 cells recovered, pour point
+#' correctly contained. terra::trim() first crops to the raster's non-NA
+#' extent so as.polygons() only ever processes the small per-site window,
+#' not the full group-extent raster watershed.tif is written at.
+watershed_to_polygon <- function(watershed_tif, site_dir, site_id, working_crs) {
+  watershed_rast <- terra::rast(watershed_tif)
+  watershed_rast[watershed_rast != 1] <- NA
+  watershed_rast <- terra::trim(watershed_rast)
 
-  whitebox::wbt_raster_to_vector_polygons(
-    input = normalizePath(watershed_tif, mustWork = TRUE),
-    output = normalizePath(catchment_shp, mustWork = FALSE)
-  )
-
-  if (!fs::file_exists(catchment_shp)) {
+  if (is.null(watershed_rast) || terra::ncell(watershed_rast) == 0) {
     cw_abort(glue::glue(
-      "Site '{site_id}': wbt_raster_to_vector_polygons() did not produce ",
-      "output. The watershed raster may be all-NoData."
+      "Site '{site_id}': watershed raster is all-NoData. ",
+      "wbt_watershed() may have failed, or the pour point fell outside ",
+      "the flow pointer extent."
     ))
   }
 
-  catchment_sf <- sf::st_read(catchment_shp, quiet = TRUE) |>
-    dplyr::filter(VALUE == 1) |>
-    sf::st_union() |>
+  catchment_sf <- terra::as.polygons(watershed_rast, dissolve = TRUE, values = FALSE) |>
     sf::st_as_sf() |>
-    dplyr::rename(geometry = x) |>
-    sf::st_transform(working_crs)
-
-  fs::dir_ls(site_dir, glob = "catchment_tmp.*") |> fs::file_delete()
+    sf::st_transform(working_crs) |>
+    # Defensive, not expected to fire — as.polygons() already returns a
+    # valid MULTIPOLYGON for the diagonal-lobe case above — but cheap
+    # insurance against any other GEOS-invalidity source downstream code
+    # (hydroweight::hydroweight()'s own clip_region handling in particular)
+    # would otherwise trip on.
+    sf::st_make_valid()
 
   if (nrow(catchment_sf) == 0 || sf::st_is_empty(catchment_sf$geometry[1])) {
     cw_abort(glue::glue(

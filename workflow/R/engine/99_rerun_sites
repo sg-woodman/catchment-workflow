@@ -127,7 +127,7 @@ rerun_engine_site_watershed <- function(
         site_dir = site_dir, site_id = site_id
       )
 
-      catchment_sf <- watershed_to_polygon_dynamic(
+      catchment_sf <- watershed_to_polygon(
         watershed_tif = watershed_tif, site_dir = site_dir, site_id = site_id,
         working_crs = config$working_crs
       )

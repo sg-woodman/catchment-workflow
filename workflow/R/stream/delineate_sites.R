@@ -82,34 +82,18 @@ load_group_rasters <- function(grp_cache, grp) {
 }
 
 # -- Pour point helpers ------------------------------------------------------
-
-#' Write a single site's pour point as a .shp file
-#'
-#' WhiteboxTools requires pour points as shapefiles. The point is written
-#' in EPSG:3979 to match the group rasters.
-#'
-#' @param site    Single-row tibble from sites (with lon, lat in WGS84)
-#' @param tmp_dir Character. Path to temporary directory for this site
-#' @return Character. Path to the written .shp file
-write_pour_point_shp <- function(site, tmp_dir) {
-  pour_point_shp <- fs::path(tmp_dir, "pour_point.shp")
-
-  # Write pour point in EPSG:3979 to match the MRDEM native CRS used for
-  # all Whitebox processing steps.
-  sf::st_as_sf(
-    site,
-    coords = c("lon", "lat"),
-    crs = 4326
-  ) |>
-    sf::st_transform(3979) |>
-    sf::st_write(
-      pour_point_shp,
-      delete_dsn = TRUE,
-      quiet = TRUE
-    )
-
-  pour_point_shp
-}
+#
+# write_pour_point_shp() (EPSG:3979-hardcoded) used to live here, alongside
+# the engine's CRS-dynamic write_pour_point_shp_dynamic() (workflow/R/
+# engine/04_delineate_site.R) — kept deliberately separate at the time so
+# the engine wouldn't need to touch this "reused unmodified" file. Retired
+# 2026-09 once confirmed to have zero live callers (every project migrated
+# onto the engine, which only ever called its own _dynamic version) — a
+# duplicate that could silently diverge from the version every pipeline
+# actually runs is a worse risk than the "unmodified" convention it was
+# preserving. See git history if you need the removed function; use
+# workflow/R/engine/04_delineate_site.R's write_pour_point_shp() (renamed
+# from write_pour_point_shp_dynamic() in the same cleanup) instead.
 
 #' Snap pour point to nearest stream using wbt_jenson_snap_pour_points
 #'
@@ -203,60 +187,19 @@ delineate_watershed <- function(
   watershed_tif
 }
 
-#' Convert watershed raster to a catchment polygon
-#'
-#' Uses wbt_raster_to_vector_polygons() — the same WhiteboxTools engine used
-#' for all other processing steps — to convert the binary watershed raster to
-#' a polygon. This produces cleaner boundaries than terra::as.polygons() as it
-#' operates natively on the Whitebox raster grid.
-#'
-#' The polygon is filtered to VALUE == 1 (catchment cells) and dissolved to
-#' a single feature in EPSG:3979, matching the MRDEM native CRS used throughout
-#' all Whitebox processing.
-#'
-#' @param watershed_tif Character. Path to watershed raster
-#' @param site_dir      Character. Site output directory (for tmp .shp output)
-#' @param site_id       Character. Site identifier (for log messages)
-#' @return sf polygon object in EPSG:3979
-watershed_to_polygon <- function(watershed_tif, site_dir, site_id) {
-  # wbt_raster_to_vector_polygons() always writes a .shp (not .gpkg)
-  catchment_shp <- fs::path(site_dir, "catchment_tmp.shp")
-
-  whitebox::wbt_raster_to_vector_polygons(
-    input = normalizePath(watershed_tif, mustWork = TRUE),
-    output = normalizePath(catchment_shp, mustWork = FALSE)
-  )
-
-  if (!fs::file_exists(catchment_shp)) {
-    cw_abort(glue::glue(
-      "Site '{site_id}': wbt_raster_to_vector_polygons() did not produce ",
-      "output. The watershed raster may be all-NoData — check that the ",
-      "snapped pour point falls within the flow pointer extent."
-    ))
-  }
-
-  catchment_sf <- sf::st_read(catchment_shp, quiet = TRUE) |>
-    # VALUE == 1 are catchment cells; 0 is background
-    dplyr::filter(VALUE == 1) |>
-    sf::st_union() |>
-    sf::st_as_sf() |>
-    dplyr::rename(geometry = x) |>
-    # Ensure output is in EPSG:3979 — matches MRDEM native CRS
-    sf::st_transform(3979)
-
-  # Clean up temporary shapefile components
-  fs::dir_ls(site_dir, glob = "catchment_tmp.*") |>
-    fs::file_delete()
-
-  if (nrow(catchment_sf) == 0 || sf::st_is_empty(catchment_sf$geometry[1])) {
-    cw_abort(glue::glue(
-      "Site '{site_id}': catchment polygon is empty after filtering VALUE == 1. ",
-      "The pour point may be outside the flow pointer extent."
-    ))
-  }
-
-  catchment_sf
-}
+# watershed_to_polygon() (EPSG:3979-hardcoded) used to live here, alongside
+# the engine's CRS-dynamic watershed_to_polygon_dynamic() (workflow/R/
+# engine/04_delineate_site.R) — same "kept separate to avoid touching this
+# reused-unmodified file" reasoning as write_pour_point_shp() above, and
+# retired for the same reason: zero live callers, confirmed directly, and
+# a real bug already happened because of it — a fix applied here (adding
+# sf::st_make_valid() to guard against a self-touching raster-to-polygon
+# artifact) silently did nothing for any real project, because every
+# project runs on the engine's own copy, not this one. See git history if
+# you need the removed function; use workflow/R/engine/04_delineate_site.R's
+# watershed_to_polygon() (renamed from watershed_to_polygon_dynamic() in
+# the same cleanup, which is where the actual st_make_valid() fix lives)
+# instead.
 
 # -- Flowlines clipping ------------------------------------------------------
 

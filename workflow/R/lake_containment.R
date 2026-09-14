@@ -501,9 +501,8 @@ prepare_lake_corrected_flow_pointer <- function(cache_dir, lake_polys, output_su
   # (attributes don't matter for that call, only geometry) is written just
   # before each wbt_flatten_lakes() call, from whatever the accumulated
   # GPKG says at that point. Same Shapefile constraint
-  # workflow/R/engine/04_delineate_site.R's write_pour_point_shp_dynamic()/
-  # stream/delineate_sites.R's write_pour_point_shp() already work around
-  # for wbt_watershed()'s pour_pts argument.
+  # workflow/R/engine/04_delineate_site.R's write_pour_point_shp() already
+  # works around for wbt_watershed()'s pour_pts argument.
   lakes_gpkg <- fs::path(out_dir, "lakes_to_flatten.gpkg")
   lakes_shp  <- fs::path(out_dir, "lakes_to_flatten_wbt_input.shp")
 
