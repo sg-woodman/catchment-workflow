@@ -227,7 +227,36 @@ clip_site_catchment <- function(site_id, catchment_pool, output_dir, native_crs 
   intersects_focal <- sf::st_intersects(others, focal, sparse = FALSE)[, 1]
   smaller <- others$area_m2 < focal_area
 
-  nested <- others[intersects_focal & smaller, ]
+  # st_intersects() is topological — it flags two catchments that merely
+  # touch at a boundary (e.g. sharing a flow divide) as "intersecting",
+  # with zero real interior overlap. That produces a false "nested"
+  # candidate whose erasure removes no actual area, yet still sets
+  # n_erased > 0 — which is the only signal drop_redundant_clipped_rows()
+  # (workflow/R/engine/99_rerun_sites) uses to decide whether a "clipped"
+  # row is worth keeping (deliberately not a numeric geometry comparison —
+  # see that function's own docstring on CRS round-trip floating-point
+  # noise). Confirmed directly on CAM streams: Aurora_Whitepine, VER01,
+  # SUD22, and SUD200 each had a boundary-touch-only "nested" neighbor
+  # (real st_intersection() area ~1e-11 km2) that produced a byte-identical
+  # catchment_clipped.gpkg — a redundant "clipped" row slipped through to
+  # catchment_metrics.csv/the hydroweight CSV undetected. Requiring genuine
+  # interior overlap here, at the source, fixes it for every downstream
+  # consumer at once rather than patching the dedup filter after the fact.
+  candidate_idx <- which(intersects_focal & smaller)
+  overlap_area_m2 <- vapply(candidate_idx, function(i) {
+    ov <- suppressWarnings(sf::st_intersection(
+      sf::st_make_valid(others[i, ]), sf::st_make_valid(focal)
+    ))
+    if (nrow(ov) == 0) return(0)
+    sum(as.numeric(sf::st_area(ov)), na.rm = TRUE)
+  }, numeric(1))
+  # 1 m^2 sits far above floating-point/topological noise from a boundary
+  # touch (observed ~1e-4 m^2 in real sym-difference checks) and far below
+  # any genuine nested-catchment overlap (which spans most/all of the
+  # smaller catchment's area) — a wide, safe margin either way.
+  meaningful_idx <- candidate_idx[overlap_area_m2 > 1]
+
+  nested <- others[meaningful_idx, ]
 
   area_km2_before <- round(focal_area / 1e6, 4)
   integrity_failed <- FALSE
@@ -319,8 +348,24 @@ clip_site_catchment <- function(site_id, catchment_pool, output_dir, native_crs 
           }
         }
 
+        # Measured in native_crs, not the pool's fixed EPSG:3979 working CRS
+        # that `clipped` is still in at this point — area_km2_before (above)
+        # comes from build_catchment_pool()'s area_m2, captured in native_crs
+        # before that transform. Mixing the two CRSes here made every
+        # erasure's "after" figure wrong by whatever areal distortion exists
+        # between EPSG:3979 and the project's native CRS (~2-3% for CAM
+        # streams' EPSG:3161 up around Sudbury) — confirmed directly on
+        # SUD103's rejected-clip fallback (reported 92.14 -> 94.45 km2 for a
+        # WRITTEN geometry that never actually changed) and on several
+        # genuine erasures reporting an area *increase*, which is impossible
+        # for a real erasure (e.g. VER01 540.56 -> 552.26, SUD22 646.67 ->
+        # 661.90) — the CRS inflation on "after" was outweighing a real but
+        # small area removed. Cosmetic only: never affected the WRITTEN
+        # catchment_clipped.gpkg (always transformed to native_crs before
+        # sf::st_write() below) or catchment_metrics.csv (computed
+        # independently, consistently, from the written file).
         area_km2_after <- round(
-          as.numeric(sf::st_area(clipped$geometry[1])) / 1e6,
+          as.numeric(sf::st_area(sf::st_transform(clipped$geometry[1], native_crs))) / 1e6,
           4
         )
         # n_erased/erased_ids describe what's actually reflected in the
