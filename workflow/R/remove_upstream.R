@@ -301,6 +301,16 @@ clip_site_catchment <- function(site_id, catchment_pool, output_dir, native_crs 
             dplyr::rename(geometry = x) |>
             dplyr::mutate(site_id = site_id)
 
+          # st_difference() can hand back a technically-invalid result even
+          # from valid inputs (confirmed directly: 21 real EMILY_TURKEY
+          # sites' catchment_clipped.gpkg came out with a self-intersecting
+          # ring or a hole positioned outside its own shell — some inherited
+          # from an already-invalid unclipped catchment, others introduced
+          # fresh by this erase operation itself). Validated here, before the
+          # fragmentation/pour-point integrity checks below, since those
+          # also rely on well-formed topology (st_cast/st_within).
+          clipped <- sf::st_make_valid(clipped)
+
           # Guard against a clip that fragments the catchment or erases the
           # site's own outlet — st_difference() has no concept of "this
           # erase_mask overlaps the focal catchment in a way that isn't
@@ -401,6 +411,17 @@ clip_site_catchment <- function(site_id, catchment_pool, output_dir, native_crs 
       # the erase math above ran in a fixed EPSG:3979 CRS regardless of
       # what CRS this project actually uses (see build_catchment_pool()).
       clipped <- sf::st_transform(clipped, native_crs)
+
+      # Re-validate AFTER the transform above, not just before it (the
+      # earlier st_make_valid() at the st_difference() result, ~60 lines
+      # up, isn't enough on its own) — confirmed directly: reprojecting a
+      # validated geometry can reintroduce a tiny self-intersection right
+      # at the same pinch point, presumably from coordinate rounding
+      # during the transform. 10 real EMILY_TURKEY sites still had an
+      # invalid catchment_clipped.gpkg with the earlier-only validation in
+      # place; re-validating here (immediately before writing, after every
+      # geometry-altering step has already run) resolved all of them.
+      clipped <- sf::st_make_valid(clipped)
 
       sf::st_write(clipped, out_path, delete_dsn = TRUE, quiet = TRUE)
 
