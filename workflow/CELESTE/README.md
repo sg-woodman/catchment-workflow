@@ -345,6 +345,26 @@ which does carry the year).
   recomputes the per-site and group-level LOI caches that depend on the
   changed catchment geometry/DEM for KEN/NIP/TUR only, and merges the
   result into the existing combined CSV rather than overwriting it.
+- **`apply_engine_fixes_2026-09-14.R`** — two shared-engine bugs found by
+  auditing CELESTE's output directly (not assumed from the CAM streams
+  investigation that surfaced them the same day): 13 sites had an
+  invalid, self-intersecting-ring `catchment.gpkg` (none had actually
+  lost their pour point, but `terra::as.polygons(dissolve = TRUE)`'s
+  fix — commit `6dc39cc` — regenerates them cleanly from the already-
+  cached `watershed.tif`), and 19 of CELESTE's 68 "clipped" rows were
+  boundary-touch false positives — a "nested" neighbor that only
+  touched the focal catchment at a shared flow divide with ~0 real
+  interior overlap, confirmed directly by symmetric-difference to
+  produce a `catchment_clipped.gpkg` byte-identical to `catchment.gpkg`
+  (commit `4010fb6`'s fix). Regenerates the 13 via
+  `rerun_engine_sites(resnap_site_ids = ...)`, which also reruns
+  `remove_upstream_catchments()` project-wide (dropping all 19 stale
+  rows, not just any overlapping the 13) and auto-detected 2 cascaded
+  neighbors (NBE1, WF_100K_INTHI). Verified after: invalid geometries
+  13 → 0, redundant clipped rows 19 → 0, pour-point containment held at
+  132/132 throughout. CELESTE's only no-burn-in group (COC) was
+  confirmed unaffected by the same day's `reclip_outputs.R` fix — it
+  has no nested sites, so no clipped row was ever written for it.
 
 ## Reproducing from scratch
 
