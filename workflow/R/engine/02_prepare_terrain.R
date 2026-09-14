@@ -51,6 +51,15 @@
 # (see 01_build_group_manifest.R::whole_domain_aoi()), so the crop is a
 # harmless identity operation; no strategy branching needed here.
 #
+# grouping$strategy = "manual_groups" (each group its own independent
+# terrain source, e.g. two non-overlapping regional DEM tiles) is handled
+# by resolve_group_terrain_config() substituting that group's own
+# dem/flow_direction/flow_pointer/flow_accum/terrain_tier onto a local copy
+# of `config` at the top of the per-group loop below — every function past
+# that point (including the tier helpers) keeps reading plain
+# config$dem/flow_direction/etc. exactly as it always has, unaware anything
+# is per-group rather than shared.
+#
 # Dependencies: terra, whitebox, fs, glue, cli (via utils.R)
 # ---------------------------------------------------------------------------
 
@@ -67,6 +76,16 @@ prepare_engine_terrain <- function(config, group_manifest) {
     burn      <- group_manifest$burn_streams[i]
 
     ensure_dir(grp_cache)
+
+    # config, with this group's own terrain inputs substituted in place of
+    # the shared top-level ones. Identity (returns config unchanged) for
+    # every strategy except "manual_groups", where each group supplies an
+    # independent terrain source instead of one shared globally — see
+    # 00_resolve_config.R / 01_build_group_manifest.R. Every helper below
+    # keeps reading config$dem/flow_direction/flow_pointer/flow_accum/
+    # terrain_tier exactly as it always has; only the values differ per
+    # group when this substitution applies.
+    config <- resolve_group_terrain_config(config, grp)
 
     pointer_path  <- fs::path(grp_cache, "flow_pointer.tif")
     breached_path <- fs::path(grp_cache, "dem_breached.tif")
@@ -167,6 +186,35 @@ prepare_engine_terrain <- function(config, group_manifest) {
   })
 
   invisible(group_manifest)
+}
+
+# -- manual_groups terrain substitution ---------------------------------------
+
+#' Substitute a group's own terrain inputs onto config, for
+#' grouping$strategy = "manual_groups" — every helper in this file keeps
+#' reading config$dem/flow_direction/flow_pointer/flow_accum/terrain_tier
+#' exactly as it always has; only the values differ per group when this
+#' substitution applies. Identity (returns config unchanged) for
+#' "whole_domain"/"hydrobasins", which already share one terrain source
+#' across every group.
+resolve_group_terrain_config <- function(config, group_id) {
+  if (!identical(config$grouping$strategy, "manual_groups")) {
+    return(config)
+  }
+  matched <- purrr::keep(config$grouping$groups, ~ identical(.x$group_id, group_id))
+  if (length(matched) != 1) {
+    cw_abort(glue::glue(
+      "Group '{group_id}': could not find exactly one matching entry in ",
+      "config$grouping$groups (manual_groups strategy)."
+    ))
+  }
+  grp_cfg <- matched[[1]]
+  config$dem            <- grp_cfg$dem
+  config$flow_direction <- grp_cfg$flow_direction
+  config$flow_pointer   <- grp_cfg$flow_pointer
+  config$flow_accum     <- grp_cfg$flow_accum
+  config$terrain_tier   <- grp_cfg$terrain_tier
+  config
 }
 
 # -- Per-tier helpers ---------------------------------------------------------

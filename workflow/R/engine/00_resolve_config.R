@@ -32,7 +32,20 @@
 #   nhn_index_path, nhn_raw_dir
 #   lake_polygons  = sf/SpatVector | NULL   (NULL = point pour point mode)
 #   lake_buffer_m
-#   grouping       = list(strategy = "whole_domain"|"hydrobasins", ...)
+#   grouping       = list(strategy = "whole_domain"|"hydrobasins"|"manual_groups", ...)
+#                    "manual_groups" is for a project whose sites split
+#                    across disjoint terrain products with no single raster
+#                    covering them all (e.g. two non-overlapping regional
+#                    DEM tiles) — top-level dem/flow_direction/flow_pointer
+#                    must be NULL, and grouping$groups supplies one
+#                    independent terrain source per group instead:
+#                      groups = list(
+#                        list(group_id = "NE", dem = list(path=...), flow_direction = list(path=..., recode=...)),
+#                        list(group_id = "NC", dem = list(path=...), flow_direction = list(path=..., recode=...))
+#                      )
+#                    Site -> group assignment is auto-detected by terrain
+#                    coverage in 01_build_group_manifest.R, not a manual
+#                    sites$group_id column (see that file for why).
 #   loi_layers
 #
 # Dependencies: sf, terra, fs, glue, cli (via utils.R)
@@ -44,11 +57,49 @@
 # any file outside workflow/R/engine/.
 `%||%` <- function(x, y) if (!is.null(x)) x else y
 
+#' Resolve which terrain tier is usable from a set of terrain inputs
+#' (flow_pointer > flow_direction > dem, highest-conditioning wins).
+#' Factored out so both the single global resolution path (whole_domain/
+#' hydrobasins share one terrain source) and the per-group resolution path
+#' ("manual_groups" — each group supplies its own) apply the exact same
+#' precedence rule from one place.
+#'
+#' @param dem,flow_direction,flow_pointer Each NULL or list(path = ...)
+#' @return "flow_pointer"/"flow_direction"/"dem", or NULL if none supplied
+resolve_terrain_tier_from_inputs <- function(dem, flow_direction, flow_pointer) {
+  has_pointer   <- !is.null(flow_pointer[["path"]])
+  has_direction <- !is.null(flow_direction[["path"]])
+  has_dem       <- !is.null(dem[["path"]])
+  if (!has_pointer && !has_direction && !has_dem) {
+    return(NULL)
+  }
+  if (has_pointer) "flow_pointer" else if (has_direction) "flow_direction" else "dem"
+}
+
+#' Resolve a raster path's native CRS as an "EPSG:####" string. Factored
+#' out so both the single-terrain-source path and manual_groups' first-
+#' group default read a CRS the same way.
+resolve_native_crs <- function(path, terrain_tier) {
+  if (!fs::file_exists(path)) {
+    cw_abort(glue::glue(
+      "Terrain input for tier '{terrain_tier}' not found: {path}"
+    ))
+  }
+  crs_desc <- terra::crs(terra::rast(path), describe = TRUE)
+  if (is.na(crs_desc$code)) {
+    cw_abort(glue::glue(
+      "Could not resolve an EPSG code from {path} — ",
+      "the raster's CRS may be undefined or unrecognized."
+    ))
+  }
+  paste0(crs_desc$authority, ":", crs_desc$code)
+}
+
 #' Validate a run_config and resolve its working CRS
 #'
 #' Checks that exactly one usable terrain-conditioning tier is present
 #' (flow_pointer > flow_direction > dem, highest already-conditioned wins),
-# that streams_burn is only configured when it can actually apply (raw dem
+#' that streams_burn is only configured when it can actually apply (raw dem
 #' tier only — burning into an already-conditioned flow direction/pointer
 #' makes no sense, since burning has to happen before flow direction is
 #' derived, not after), and that grouping.strategy is supported. Adds
@@ -67,29 +118,84 @@ resolve_engine_config <- function(config) {
     ))
   }
 
-  # -- Terrain tier: exactly one of flow_pointer / flow_direction / dem must
-  # be usable as the highest-available-conditioning source. dem may ALSO be
-  # supplied alongside flow_pointer/flow_direction purely to provide an
-  # elevation surface for per-site clipping/output/hydroweight — that's not
-  # a second "tier", so only flow_pointer/flow_direction compete for tier
-  # selection; dem is always allowed to coexist.
-  has_pointer   <- !is.null(config$flow_pointer[["path"]])
-  has_direction <- !is.null(config$flow_direction[["path"]])
-  has_dem       <- !is.null(config$dem[["path"]])
-
-  if (!has_pointer && !has_direction && !has_dem) {
-    cw_abort(paste(
-      "run_config must supply at least one terrain input:",
-      "flow_pointer$path, flow_direction$path, or dem$path."
+  # -- Grouping strategy — resolved early. "manual_groups" changes how
+  # terrain inputs and working CRS are resolved below (each group supplies
+  # its own terrain source instead of one shared globally), so the rest of
+  # this function branches on it from here on.
+  strategy <- config$grouping[["strategy"]] %||% "whole_domain"
+  if (!strategy %in% c("whole_domain", "hydrobasins", "manual_groups")) {
+    cw_abort(glue::glue(
+      "grouping$strategy must be 'whole_domain', 'hydrobasins', or 'manual_groups' — got '{strategy}'."
     ))
   }
+  if (strategy == "hydrobasins" && is.null(config$grouping[["hydrobasins_dir"]])) {
+    cw_abort("grouping$strategy = 'hydrobasins' requires grouping$hydrobasins_dir.")
+  }
+  config$grouping$strategy <- strategy
 
-  terrain_tier <- if (has_pointer) {
-    "flow_pointer"
-  } else if (has_direction) {
-    "flow_direction"
+  if (strategy == "manual_groups") {
+    # -- "manual_groups": each group supplies its own independent terrain
+    # source (dem/flow_direction/flow_pointer/flow_accum) instead of one
+    # shared across every group like "whole_domain"/"hydrobasins" — for a
+    # project whose sites split across disjoint terrain products (e.g. two
+    # non-overlapping regional DEM tiles) with no single raster covering
+    # them all. Top-level dem/flow_direction/flow_pointer must stay unset
+    # to avoid an ambiguous dual configuration.
+    if (!is.null(config$dem) || !is.null(config$flow_direction) || !is.null(config$flow_pointer)) {
+      cw_abort(paste(
+        "grouping$strategy = 'manual_groups' supplies terrain per group via",
+        "grouping$groups — top-level dem/flow_direction/flow_pointer must",
+        "be NULL/absent to avoid an ambiguous dual configuration."
+      ))
+    }
+    groups <- config$grouping[["groups"]]
+    if (is.null(groups) || length(groups) == 0) {
+      cw_abort("grouping$strategy = 'manual_groups' requires a non-empty grouping$groups list.")
+    }
+    group_ids <- purrr::map_chr(groups, ~ .x[["group_id"]] %||% NA_character_)
+    if (anyNA(group_ids) || any(group_ids == "")) {
+      cw_abort("Every entry in grouping$groups must have a non-empty group_id.")
+    }
+    if (anyDuplicated(group_ids) > 0) {
+      cw_abort(glue::glue(
+        "Duplicate group_id(s) in grouping$groups: ",
+        "{paste(unique(group_ids[duplicated(group_ids)]), collapse = ', ')}"
+      ))
+    }
+
+    # Resolve each group's own terrain tier up front, same precedence rule
+    # as the single-source path, and stash it back onto the group entry —
+    # 02_prepare_terrain.R reads grouping$groups[[i]]$terrain_tier directly.
+    groups <- purrr::map(groups, function(g) {
+      tier <- resolve_terrain_tier_from_inputs(g$dem, g$flow_direction, g$flow_pointer)
+      if (is.null(tier)) {
+        cw_abort(glue::glue(
+          "Group '{g$group_id}' (manual_groups) must supply at least one of ",
+          "dem$path, flow_direction$path, or flow_pointer$path."
+        ))
+      }
+      g$terrain_tier <- tier
+      g
+    })
+    config$grouping$groups <- groups
+
+    terrain_tier <- "manual_groups" # sentinel — real per-group tiers live in grouping$groups[[i]]$terrain_tier
   } else {
-    "dem"
+    # -- Terrain tier: exactly one of flow_pointer / flow_direction / dem
+    # must be usable as the highest-available-conditioning source. dem may
+    # ALSO be supplied alongside flow_pointer/flow_direction purely to
+    # provide an elevation surface for per-site clipping/output/hydroweight
+    # — that's not a second "tier", so only flow_pointer/flow_direction
+    # compete for tier selection; dem is always allowed to coexist.
+    terrain_tier <- resolve_terrain_tier_from_inputs(
+      config$dem, config$flow_direction, config$flow_pointer
+    )
+    if (is.null(terrain_tier)) {
+      cw_abort(paste(
+        "run_config must supply at least one terrain input:",
+        "flow_pointer$path, flow_direction$path, or dem$path."
+      ))
+    }
   }
 
   # -- streams_burn only applies to the raw-dem tier — burning has to
@@ -97,9 +203,12 @@ resolve_engine_config <- function(config) {
   # its input), so it's meaningless once a pre-conditioned flow_pointer/
   # flow_direction is supplied directly. Warn (not abort) rather than
   # silently ignoring a config the user may have copy-pasted from another
-  # project without adjusting.
+  # project without adjusting. Skipped for "manual_groups" — each group
+  # there dispatches on its OWN resolved tier in 02_prepare_terrain.R, so a
+  # single blanket check here would be wrong the moment groups have
+  # different tiers (e.g. one pre-conditioned, one raw dem).
   burn_source <- config$streams_burn[["source"]] %||% "none"
-  if (terrain_tier != "dem" && burn_source != "none") {
+  if (!identical(terrain_tier, "manual_groups") && terrain_tier != "dem" && burn_source != "none") {
     cw_warn(glue::glue(
       "streams_burn$source = '{burn_source}' has no effect — terrain tier ",
       "is '{terrain_tier}', which is already conditioned. Burning only ",
@@ -130,9 +239,10 @@ resolve_engine_config <- function(config) {
   # same way in a run_config. Opt-in, default "none" — a project supplying
   # an already-conditioned flow_direction/flow_pointer should have zero
   # behavior change; that pre-conditioned surface is trusted as-is, which
-  # is the whole point of supplying one.
+  # is the whole point of supplying one. Same "manual_groups" skip as
+  # streams_burn above, for the same reason.
   lake_source <- config$lake_conditioning[["source"]] %||% "none"
-  if (terrain_tier != "dem" && lake_source != "none") {
+  if (!identical(terrain_tier, "manual_groups") && terrain_tier != "dem" && lake_source != "none") {
     cw_warn(glue::glue(
       "lake_conditioning$source = '{lake_source}' has no effect — terrain ",
       "tier is '{terrain_tier}', which is already conditioned. Lake ",
@@ -168,40 +278,31 @@ resolve_engine_config <- function(config) {
   # (largest confirmed so far ~16 sq km).
   config$lake_conditioning$site_buffer_m <- config$lake_conditioning[["site_buffer_m"]] %||% 20000
 
-  # -- Grouping strategy
-  strategy <- config$grouping[["strategy"]] %||% "whole_domain"
-  if (!strategy %in% c("whole_domain", "hydrobasins")) {
-    cw_abort(glue::glue(
-      "grouping$strategy must be 'whole_domain' or 'hydrobasins' — got '{strategy}'."
-    ))
-  }
-  if (strategy == "hydrobasins" && is.null(config$grouping[["hydrobasins_dir"]])) {
-    cw_abort("grouping$strategy = 'hydrobasins' requires grouping$hydrobasins_dir.")
-  }
-  config$grouping$strategy <- strategy
-
   # -- Resolve the terrain tier's own native CRS (always needed — used as
   # the default working_crs, and always logged even when overridden, so a
-  # reprojection is visible rather than silent).
-  crs_source_path <- switch(
-    terrain_tier,
-    flow_pointer   = config$flow_pointer[["path"]],
-    flow_direction = config$flow_direction[["path"]],
-    dem            = config$dem[["path"]]
-  )
-  if (!fs::file_exists(crs_source_path)) {
-    cw_abort(glue::glue(
-      "Terrain input for tier '{terrain_tier}' not found: {crs_source_path}"
-    ))
+  # reprojection is visible rather than silent). For "manual_groups" there
+  # is no single terrain source to read; the FIRST group's own native CRS
+  # is used as the default instead — 02_prepare_terrain.R already
+  # reprojects any source whose CRS doesn't match working_crs, so a later
+  # group in a different CRS is handled the same way any other mismatch is,
+  # not a special case.
+  if (identical(terrain_tier, "manual_groups")) {
+    first_group <- config$grouping$groups[[1]]
+    crs_source_path <- switch(
+      first_group$terrain_tier,
+      flow_pointer   = first_group$flow_pointer[["path"]],
+      flow_direction = first_group$flow_direction[["path"]],
+      dem            = first_group$dem[["path"]]
+    )
+  } else {
+    crs_source_path <- switch(
+      terrain_tier,
+      flow_pointer   = config$flow_pointer[["path"]],
+      flow_direction = config$flow_direction[["path"]],
+      dem            = config$dem[["path"]]
+    )
   }
-  crs_desc <- terra::crs(terra::rast(crs_source_path), describe = TRUE)
-  if (is.na(crs_desc$code)) {
-    cw_abort(glue::glue(
-      "Could not resolve an EPSG code from {crs_source_path} — ",
-      "the raster's CRS may be undefined or unrecognized."
-    ))
-  }
-  native_crs <- paste0(crs_desc$authority, ":", crs_desc$code)
+  native_crs <- resolve_native_crs(crs_source_path, terrain_tier)
 
   # -- Working CRS: config$crs, if supplied, overrides the terrain tier's
   # native CRS — 02_prepare_terrain.R reprojects every terrain raster to
@@ -223,6 +324,15 @@ resolve_engine_config <- function(config) {
     }
   } else {
     working_crs <- native_crs
+    if (identical(terrain_tier, "manual_groups") && length(config$grouping$groups) > 1) {
+      cw_inform(glue::glue(
+        "config$crs not set — working CRS defaults to manual group ",
+        "'{config$grouping$groups[[1]]$group_id}''s native CRS ({native_crs}). ",
+        "Any other group whose terrain source uses a different CRS will be ",
+        "reprojected to match in 02_prepare_terrain.R (same as any other ",
+        "CRS mismatch)."
+      ))
+    }
   }
 
   check_crs_suitability(working_crs)
