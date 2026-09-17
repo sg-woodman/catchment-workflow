@@ -71,8 +71,9 @@
 #          output_dir = output_dir, cache_dir = cache_dir, loi_layers = loi_layers
 #        )
 #
-# DATA QUALITY FLAG: SUD11 is excluded (EXCLUDED_SITE_IDS below) — see
-# README.md's "Site list and the SUD11 exclusion" note.
+# DATA QUALITY FLAG (RESOLVED 2026-09-17): SUD11 was excluded
+# (EXCLUDED_SITE_IDS below) for a bad source longitude, now corrected —
+# see README.md's "Site list and the SUD11 exclusion" note.
 # =============================================================================
 
 # -- Packages ------------------------------------------------------------------
@@ -156,10 +157,12 @@ MIN_CELLS        <- 10  # minimum catchment size before flagging
 # sites: 25 "Summer"/CRADLES-lakes-adjacent + 14 "Fall"/MOE long-term
 # monitoring gauges; blank separator row already dropped in the CSV).
 
-EXCLUDED_SITE_IDS <- c("SUD11") # lon = -51.2 in source — 2500+ km off from
-# neighbouring SUD12/VER01 (both ~-81.0) — almost certainly a typo in the
-# source workbook. Verify against Cameron Lefebvre's original data before
-# re-including.
+EXCLUDED_SITE_IDS <- character(0) # SUD11 was excluded (lon = -51.2 in
+# source — 2500+ km off from neighbouring SUD12/VER01, both ~-81.0) until
+# 2026-09-17, when the source coordinate was corrected to lon = -81.15433
+# (data/cam_stream_sites_raw.csv and data/cam_stream_sites_raw.gpkg both
+# updated) and it was re-added via
+# workflow/CAM/one_off/rerun_sud11_20260917.R.
 
 sites_raw <- readr::read_csv(here("data/cam_stream_sites_raw.csv"), show_col_types = FALSE)
 

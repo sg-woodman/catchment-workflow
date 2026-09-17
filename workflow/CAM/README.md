@@ -132,10 +132,15 @@ Lefebvre.xlsx`, Sheet1, via `data/cam_stream_sites_raw.csv` (39 sites: 25
 "Summer"/CRADLES-lakes-adjacent + 14 "Fall"/MOE long-term monitoring
 gauges).
 
-**`SUD11` is excluded** (`EXCLUDED_SITE_IDS`) — source row has
-`lon = -51.2`, 2500+ km off from its neighbors `SUD12`/`VER01` (both
-~-81.0), almost certainly a typo in the source workbook. Verify against
-Cameron Lefebvre's original data before re-including.
+**`SUD11` was excluded** (`EXCLUDED_SITE_IDS`) from initial delivery
+through 2026-09-16 — source row had `lon = -51.2`, 2500+ km off from its
+neighbors `SUD12`/`VER01` (both ~-81.0), almost certainly a typo in the
+source workbook. Corrected to `lon = -81.15433` on 2026-09-17 (both
+`data/cam_stream_sites_raw.csv` and `data/cam_stream_sites_raw.gpkg`
+updated) and re-added via `workflow/CAM/one_off/rerun_sud11_20260917.R`,
+using `rerun_engine_sites(resnap_site_ids = "SUD11", ...)` since the site
+had never been delineated (not a re-snap of an existing catchment).
+`EXCLUDED_SITE_IDS` in `run_cam_streams.R` is now empty.
 
 ### Terrain
 
@@ -205,6 +210,48 @@ follows:
   lake correction involved.
 - **SUD102, SUD103, Tilton** — genuine lake bisection; rerun via
   `fix_lake_bisection.R`'s `correct_lake_bisected_sites()`.
+
+### SUD103/NCMN sliver fix (`one_off/fix_ncmn_sliver_20260917.R`)
+
+Consequence of the above: NCMN was deliberately left uncorrected while
+SUD103 (its downstream neighbor) was redelineated against a lake-flattened
+D8 pointer — the two now trace their shared boundary from two different
+flow fields. `remove_upstream.R`'s erasure of NCMN ∪ SUD101 ∪ SUD200 from
+SUD103 (`workflow/CAM/one_off/rerun_sud11_20260917.R`'s incidental
+full-list rerun, adding SUD11, surfaced this) left 4 small disconnected
+fragments instead of one clean polygon, tripping the fragmentation
+integrity check and falling back to SUD103's full unclipped catchment
+(94 km2) instead of the correct ~49 km2 clipped result.
+
+Investigated by directly recomputing the erasure and checking each
+fragment's distance to its neighbors:
+- **1 fragment (1.53 ha)** sits flush against NCMN (distance 0m) — the
+  genuine NCMN/SUD103 boundary mismatch.
+- **3 fragments (0.09 ha each — exactly one 30 m DEM cell)** sit flush
+  against SUD102's boundary instead (1.4-13 km from NCMN) — pixel-level D8
+  boundary noise near SUD102's outlet, unrelated to the NCMN issue.
+
+Fix (Sam's call, 2026-09-17): geometrically patch NCMN's `catchment.gpkg`
+to absorb the genuine 1.53 ha fragment (union, not a full redelineation
+with the corrected pointer — deliberately scoped, not hardcoded into the
+shared engine), and directly erase the 3 pixel artifacts from SUD103's
+`catchment_clipped.gpkg` (they aren't a "site" `remove_upstream.R`'s
+normal nested-erasure logic can erase). NCMN's own per-site rasters
+(`dem.tif` etc.) were force-reclipped to the patched boundary; SUD103's
+`catchment_clipped.gpkg` was written directly (bypassing the standard
+mechanism, which can't erase non-site geometry) with `n_erased = 3` so the
+downstream CSV merge treats it as a genuine (not redundant-vs-unclipped)
+clipped row. SUD102 was also recomputed as a cascaded neighbor (its own
+erase mask includes both NCMN and SUD103) — confirmed unaffected (same
+26.18 km2 clipped area as before), since the absorbed fragment was already
+inside SUD103's footprint from SUD102's point of view either way.
+
+Result: NCMN 8.901 -> 8.9163 km2 (unclipped), SUD103 clipped 94.4 -> ~49.4
+km2 (single valid polygon, verified via `st_is_valid()`/`st_cast("POLYGON")`
+returning exactly 1 part). Not a general engine fix — if a future
+lake-bisection correction leaves a similar neighbor mismatch elsewhere,
+diagnose with the same fragment-distance approach before assuming the same
+1-real/3-pixel split applies.
 
 ### NDVI: superseded source (2026-08-26)
 
