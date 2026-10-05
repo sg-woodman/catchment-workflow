@@ -33,7 +33,7 @@ execute:
   echo: true
   warning: false
   message: false
-  cache: true
+  cache: false
 ---
 
 ```{r}
@@ -41,6 +41,7 @@ execute:
 #| include: false
 #| cache: false
 
+library(here)
 library(sf)
 library(terra)
 library(dplyr)
@@ -64,22 +65,39 @@ library(patchwork)
 # alongside each stage (grey, non-executed blocks) is reference — copy it into
 # an R session if you actually need to run that step.
 #
-# NOTE: the stream worked example below reads output/CELESTE/ and
-# cache/CELESTE/NBE/ — the current, engine-based run_celeste.R's own output
-# (through 2026-08-30, CELESTE ran on a modular engine but wrote to
-# output/CELESTE_engine/ + cache/CELESTE_engine/, kept physically separate
-# from a still-on-disk pre-engine run's own output/CELESTE + cache/CELESTE +
-# cache/NBE; the 2026-08-31 output/cache consolidation retired that old
-# pre-engine data for real and renamed CELESTE_engine -> CELESTE once
-# nothing else depended on the old copy — see git history around that date,
-# including workflow/R/engine/03_prepare_streams_burn.R's flowlines.gpkg
-# persistence fix + workflow/CELESTE/backfill_streams_gpkg_nbe.R, both
-# needed so NBE's engine output had every file this guide reads).
+# This file lives in docs/, one level below the project root, but every path
+# below (cache/..., output/...) is written root-relative — set knitr's
+# working directory to the project root once, here, rather than prefixing
+# every read with "../".
+knitr::opts_knit$set(root.dir = here::here())
+
+# The stream worked example reads output/CELESTE/ and cache/CELESTE/NBE/ —
+# the current, engine-based run_celeste.R's own output. (Pre-2026-08-31 this
+# lived under a separate output/CELESTE_engine/ + cache/CELESTE_engine/,
+# physically apart from a still-on-disk pre-engine run of the same name; a
+# 2026-08-31 consolidation retired the pre-engine copy for real and renamed
+# CELESTE_engine -> CELESTE. See git history around that date if older
+# material still references the old paths.)
 #
-# autodep = TRUE lets chunk caching (execute: cache: true, above) correctly
-# invalidate a cached chunk when an *upstream* chunk it reads variables from
-# changes, even though this chunk itself didn't.
-knitr::opts_chunk$set(fig.align = "center", autodep = TRUE)
+# This guide's worked examples (NBE for streams, 4 CAM lakes) cover the two
+# *pipeline kinds* the engine supports — point pour point and lake polygon.
+# Every project added since (CAM streams, EMILY_TURKEY) is one of those two
+# kinds on the same engine, not a third kind, so they aren't walked through
+# step-by-step here; the Overview and Cross-cutting sections below describe
+# what differs about them instead. See each project's own
+# workflow/<PROJECT>/README.md for full detail.
+#
+# Chunk caching (knitr's execute: cache:) is deliberately OFF: every chunk
+# here just rereads small-to-moderate local files under cache/ and output/
+# (no re-running of the GIS pipeline itself, no network calls other than
+# maptiles::get_tiles()/rnaturalearth::ne_states(), both of which keep their
+# own small on-disk tile/data caches independent of knitr — rosm.cache/ is
+# ~64K). A full cold render takes ~50s; knitr caching only shaved that to
+# ~22s by pickling large SpatRaster/sf R objects to disk, at a cost of
+# ~32MB of *_cache/ that regenerates on every render and was never actually
+# needed for speed. Turn it back on (cache: true in the YAML above) only if
+# this document grows chunks that are genuinely expensive to recompute.
+knitr::opts_chunk$set(fig.align = "center")
 
 # -- Shared plotting helpers --------------------------------------------------
 
@@ -147,22 +165,43 @@ This guide was drafted with assistance from Claude (Anthropic), reading directly
 
 This workflow delineates catchments from pour-point coordinates for sites across Canada and computes morphometric and distance-weighted landscape metrics for each one. It is **project-agnostic**: a sites table and a handful of shared external datasets go in, self-contained per-site output folders come out.
 
-Two pipelines currently run on it, sharing most of their machinery but differing wherever the feature type forces a difference — what the "outflow" target is, and whether flow products are prepared per-group or once for the whole project. This guide uses a real, already-processed example of each:
+Every project on it reduces to one of two **pipeline kinds**, sharing most of their machinery but differing wherever the feature type forces a difference — what the "outflow" target is, and whether flow products are prepared per-group or once for the whole project. This guide uses a real, already-processed example of each:
 
 | | **Stream pipeline** | **Lake pipeline** |
 |---|---|---|
 | Feature type | River/stream pour point | Lake polygon |
 | Example used below | `NBE` group — 8 New Brunswick sites (`NBE1`–`NBE8`) | `Clearwater`, `Swan`, `Tilton`, `Lohi` |
-| Runner | `workflow/CELESTE/run_celeste.R` (engine-based; this example shows the retained pre-engine run) | `workflow/run_cam_lakes.R` |
+| Runner | `workflow/CELESTE/run_celeste.R` | `workflow/run_cam_lakes.R` |
 | CRS | EPSG:3979 (Canada Atlas Lambert) | EPSG:3161 (Ontario MNR Lambert) |
 | DEM source | MRDEM 30 m national VRT | OIH Enforced DEM (Ontario) |
 | Hydroweight `target_O` | Snapped pour **point** (no area) | Lake **polygon** (has area → `remove_region`) |
-| DEM/flow products | Per-`group_id` (HydroBasins-derived AOI) | One project-wide raster |
+| DEM/flow products | Per-`group_id` | One project-wide raster |
 | LOI(s) demonstrated | NDVI, NDVI trend, harvest/regen | CANLCC land cover |
+
+Four projects currently run on the engine — all of them one of the two kinds above, never a third:
+
+| Project | Kind | Sites | Terrain | Grouping |
+|---|---|---|---|---|
+| CELESTE | Stream | 132 | MRDEM (raw, breached per group) | `"hydrobasins"` |
+| CAM streams | Stream | 38 | OIH (pre-conditioned) | `"whole_domain"` |
+| EMILY_TURKEY | Stream | 177 | OIH (pre-conditioned), **two disjoint tiles** | `"manual_groups"` |
+| CAM lakes | Lake | 45 | OIH (pre-conditioned) | `"whole_domain"` |
+
+Each project's own `workflow/<PROJECT>/README.md` has the full rationale, data paths, and one-off corrections specific to it — not duplicated here, since this file documents the shared engine, not any one project's run of it.
+
+::: {.callout-note}
+A fifth project, `EMILY_NHN`, was built to delineate the same 177 sites as EMILY_TURKEY via CELESTE's own MRDEM+NHN+HydroBasins approach, as a direct head-to-head comparison against EMILY_TURKEY's OIH+`manual_groups` approach. It was abandoned in favour of EMILY_TURKEY before ever being run — the code remains under `workflow/EMILY_NHN/` as a record, but `output/EMILY_NHN/` was never produced and shouldn't be expected to exist.
+:::
 
 ### Two-tier processing: groups and sites
 
 Expensive DEM conditioning (breach depressions, flow direction, flow accumulation) is run once per **group** — a hydrologically coherent region sharing a DEM — never once per site. A **site** is a single pour point (or lake); several sites sharing a `group_id` reuse the same conditioned DEM and flow-accumulation raster. In the stream pipeline, `NBE` is one such group: all 8 NBE sites share `cache/CELESTE/NBE/dem.tif`, `flow_pointer.tif`, and `flow_accum.tif`.
+
+How a project's sites get split into groups is itself pluggable (`config$grouping$strategy`, resolved in `engine/01_build_group_manifest.R`):
+
+- **`"hydrobasins"`** — CELESTE. One group per HydroBasins level-6 region a project's sites fall in; used whenever terrain is a single national mosaic (MRDEM) that needs a bounded AOI cropped out of it.
+- **`"whole_domain"`** — CAM streams and CAM lakes. One trivial group, no cropping; used whenever one pre-conditioned raster already covers every site.
+- **`"manual_groups"`** — EMILY_TURKEY. One group per terrain *source*, auto-detected by which sites each source's raster actually covers. Added specifically because EMILY_TURKEY's 177 sites split across two disjoint OIH tiles with zero overlap (`IntegratedHydrologyNE` / `IntegratedHydrologyNC`) — neither `"whole_domain"` (assumes one raster covers everyone) nor `"hydrobasins"` (assumes one shared national mosaic) fit that.
 
 ::: {.columns}
 
@@ -215,58 +254,80 @@ workflow/
 │   ├── utils.R                   shared: logging, validation, AOI helpers
 │   ├── stream/                   reusable stream/river building blocks —
 │   │   │                         used directly by engine/, not a pipeline
-│   │   │                         of their own (old numbered-stage files
-│   │   │                         retired; see git history). No numeric
-│   │   │                         prefixes — order is set by the caller.
+│   │   │                         of their own. No numeric prefixes — order
+│   │   │                         is set by the caller (the engine).
 │   │   ├── group_sites.R
 │   │   ├── burn_streams.R
 │   │   ├── delineate_sites.R
-│   │   ├── 99_rerun_sites        pre-engine only; kept for an unrelated script
 │   │   └── hydroweight_attributes.R
 │   ├── lake/                     reusable lake building blocks, same role
-│   │   │                         as stream/ (old 02_prepare_oih_dem.R /
-│   │   │                         03_delineate_lakes.R retired; terrain
-│   │   │                         prep + delineation now go through engine/)
+│   │   │                         as stream/ — terrain prep + delineation
+│   │   │                         go through engine/, not this folder
 │   │   ├── match_lake_polygons.R
 │   │   ├── remove_upstream_lakes.R
 │   │   └── hydroweight_attributes.R
 │   ├── engine/                   modular, input-driven delineation engine —
-│   │   │                         standard approach for every project now
+│   │   │                         standard approach for every project
 │   │   ├── 00_resolve_config.R
-│   │   ├── 01_build_group_manifest.R
+│   │   ├── 01_build_group_manifest.R   whole_domain / hydrobasins / manual_groups
 │   │   ├── 02_prepare_terrain.R
 │   │   ├── 03_prepare_streams_burn.R
 │   │   ├── 04_delineate_site.R
+│   │   ├── prepare_lake_conditioning.R  upfront lake-bisection prevention (opt-in)
 │   │   └── 99_rerun_sites
 │   ├── remove_upstream.R         shared (stream nesting)
 │   ├── reclip_outputs.R          shared (stream + lake)
-│   └── catchment_metrics.R       shared (stream + lake)
+│   ├── catchment_metrics.R       shared (stream + lake)
+│   └── lake_containment.R        shared: lake-bisection detection, reused by
+│                                  every project's own fix_lake_bisection.R
 ├── raster_attributes.R           generic LOI-prep toolbox (project-agnostic)
-├── CELESTE/                      CELESTE runner (engine-based) + LOI prep
+├── gee_utils.R                   generic Google Earth Engine helpers (project-agnostic)
+├── CELESTE/                      CELESTE-specific: runner, LOI prep, README
 │   ├── run_celeste.R
+│   ├── README.md                 data paths, config rationale, one-off corrections
 │   ├── prepare_ndvi.R
+│   ├── prepare_ndvi_masked.R     lake-masked NDVI LOI
 │   ├── prepare_ndvi_trend.R
 │   ├── prepare_harvest_regen.R
-│   └── tidy_outputs.R            long-format plotting-ready tables
-├── CAM/                          CAM streams runner (engine-based) + LOI prep
+│   ├── tidy_outputs.R            long-format plotting-ready tables
+│   ├── fix_lake_bisection.R      reactive fallback (see Cross-cutting concepts)
+│   └── one_off/                  historical one-off/backfill scripts, kept for the record
+├── CAM/                          CAM streams-specific: runner, LOI prep, README
 │   ├── run_cam_streams.R
+│   ├── README.md
 │   ├── prepare_ndvi.R
+│   ├── prepare_ndvi_masked.R
 │   ├── prepare_ndvi_trend.R
 │   ├── prepare_harvest_regen.R
 │   ├── upload_catchments_to_gee.R
-│   └── tidy_outputs.R
+│   ├── tidy_outputs.R
+│   ├── fix_lake_bisection.R
+│   └── one_off/
+├── EMILY_TURKEY/                 177 sites, OIH terrain (two-tile manual_groups)
+│   ├── run_emily_turkey.R
+│   ├── README.md                 the two-tile discovery, manual_groups rationale
+│   ├── tidy_outputs.R
+│   └── one_off/
+├── EMILY_NHN/                    abandoned in favour of EMILY_TURKEY, never run —
+│   │                             kept as a record, not an active project
+│   ├── run_emily_nhn.R
+│   └── assign_hydrobasins_groups.R
+├── one_off/                      project-agnostic historical one-off/backfill scripts
 ├── templates/
 │   └── run_engine_template.R     blank TODO-annotated skeleton for a new project
-└── run_cam_lakes.R                CAM lakes runner (engine-based)
+└── run_cam_lakes.R                CAM lakes runner
 
 code/
 └── reset_workflow.R              cache/output reset helpers
 
-cache/<group_id>/  or  cache/CAM/       group-level rasters (auto-created)
-output/<site_id>/  or  output/CAM/…     per-site outputs (auto-created)
+docs/
+└── catchment_delineation_guide.qmd   this document
+
+cache/<PROJECT>/<group_id>/  or  cache/<PROJECT>/   group-level rasters (auto-created;
+output/<PROJECT>/<site_id>/                          flat cache under whole_domain grouping)
 ```
 
-Anything specific to one pipeline — the runner and its LOI `prepare_*.R` scripts — lives in its own folder (`workflow/CELESTE/` for the stream pipeline; the lake pipeline doesn't need one yet, since `run_cam_lakes.R` is still self-contained). This keeps one pipeline's data-prep quirks from ever needing to be reconciled with the other's.
+Anything specific to one project — its runner, LOI `prepare_*.R` scripts, `fix_lake_bisection.R`, and `one_off/` corrections — lives entirely inside that project's own `workflow/<PROJECT>/` folder, each with a `README.md` carrying the rationale, data paths, and one-off decisions that don't belong in the project-agnostic root `CLAUDE.md`. This is deliberate: it keeps one project's data-prep and correction quirks from ever needing to be reconciled with another's, and it's why this guide documents the shared engine and cross-cutting concepts rather than walking through every project one by one — read a project's own README for that.
 
 ---
 
@@ -368,16 +429,17 @@ prepare_dem(group_manifest, mrdem_vrt = MRDEM_VRT_PATH, target_crs = 3979)
 
 ## Stage 3 — Burn NHN streams (optional, per group)
 
-When `burn_streams = TRUE` for a group, NHN flowlines are merged (fixing two known geometry issues — dropping M-coordinates and casting to a single `MULTILINESTRING` type) and burned into the DEM before conditioning, anchoring flow paths to mapped channels. NBE has `burn_streams = TRUE`; its cached NHN layers cover the whole group AOI (59,701 flowline features), so the figure below crops to a small window around `NBE1` rather than plotting the full group.
+When `burn_streams = TRUE` for a group, NHN flowlines are merged (fixing two known geometry issues — dropping M-coordinates and casting to a single `MULTILINESTRING` type) and burned into the DEM before conditioning, anchoring flow paths to mapped channels. NBE has `burn_streams = TRUE`; its cached flowlines cover the whole group AOI, so the figure below crops to a small window around `NBE1` rather than plotting the full group.
+
+Only `flowlines.gpkg` is persisted to the group cache — a companion `waterbodies.gpkg` used to be written too, but the engine deliberately dropped it: nothing downstream reads a persisted group-level waterbodies file (lake-bisection checking, see Cross-cutting concepts below, does its own on-the-fly NHN fetch instead), so writing one unconditionally would add real runtime to every group's terrain prep for no consumer.
 
 ```{r}
 #| label: nbe-streams
-#| fig-cap: "NHN flowlines and waterbodies burned into the DEM near NBE1 (small window; the full NBE cache holds 59,701 flowline features across the group AOI)."
+#| fig-cap: "NHN flowlines burned into the DEM near NBE1 (small window; the full NBE cache holds thousands of flowline features across the group AOI)."
 window    <- st_buffer(st_as_sfc(st_bbox(nbe1_catchment)), 2000)
 window_bb <- st_bbox(window)
 
-flowlines_win   <- st_read("cache/CELESTE/NBE/flowlines.gpkg", quiet = TRUE, wkt_filter = st_as_text(window))
-waterbodies_win <- st_read("cache/CELESTE/NBE/waterbodies.gpkg", quiet = TRUE, wkt_filter = st_as_text(window))
+flowlines_win <- st_read("cache/CELESTE/NBE/flowlines.gpkg", quiet = TRUE, wkt_filter = st_as_text(window))
 
 # wkt_filter keeps any feature that *intersects* the window, not just the
 # part of it inside the window — a flowline crossing the edge can extend far
@@ -385,7 +447,6 @@ waterbodies_win <- st_read("cache/CELESTE/NBE/waterbodies.gpkg", quiet = TRUE, w
 # auto-fit to every layer's full (unclipped) extent.
 ggplot() +
   geom_sf(data = window, fill = "grey97", colour = NA) +
-  geom_sf(data = waterbodies_win, fill = "#a6cee3", colour = NA) +
   geom_sf(data = flowlines_win, colour = "#1f78b4", linewidth = 0.4) +
   geom_sf(data = nbe1_catchment, fill = NA, colour = "#D55E00", linewidth = 0.6) +
   coord_sf(xlim = c(window_bb["xmin"], window_bb["xmax"]),
@@ -406,7 +467,7 @@ flowlines |>
 ```
 
 ::: {.callout-tip}
-Groups with no matching NHN sheets get empty `flowlines.gpkg`/`waterbodies.gpkg` and a warning, then continue with `burn_streams = FALSE` — a missing NHN download never hard-stops the workflow.
+Groups with no matching NHN sheets get an empty `flowlines.gpkg` and a warning, then continue with `burn_streams = FALSE` — a missing NHN download never hard-stops the workflow.
 :::
 
 ## Stage 4 — WhiteboxTools conditioning
@@ -688,7 +749,7 @@ schemes <- tribble(
 gt(schemes)
 ```
 
-Three LOIs are prepared for the stream pipeline (`workflow/CELESTE/prepare_*.R`): continuous NDVI (annual mosaic, 1984–2025), a per-pixel NDVI Theil-Sen slope/Mann-Kendall trend (one raster per group, ~29 min one-time), and a categorical harvest/regen layer (Ontario + New Brunswick sources, 2002–2024, one band per year plus a combined band).
+Six LOIs are now prepared for the stream pipeline (`workflow/CELESTE/prepare_*.R`, mirrored under `workflow/CAM/`): continuous NDVI (annual mosaic, 1984–2025) and a per-pixel NDVI Theil-Sen slope/Mann-Kendall trend (one raster per group, ~29 min one-time), each with a lake-masked sibling (`ndvi_masked` / `ndvi_trend_masked`, via `prepare_ndvi_masked.R`) — masked because a lake pixel's NDVI isn't a terrestrial-vegetation reading and otherwise drags a catchment's summarized NDVI down in proportion to how much open water it contains; kept as a *separate* named LOI alongside the unmasked one, never applied in place, so both stay independently inspectable; a categorical harvest/regen layer (Ontario + New Brunswick sources, 2002–2024, one band per year plus a combined band); and CANLCC land cover (added to the stream pipeline after first being demonstrated below for lakes). The two demonstrated below (NDVI trend, harvest/regen) are enough to show how the mechanics — LOI descriptor shapes, weighting schemes — work; the newer ones follow the same pattern.
 
 ```{r}
 #| label: nbe-hydroweight
@@ -1163,8 +1224,17 @@ reset_all()                   # everything — cache and outputs
 
 | Pipeline | Symptom | Fix |
 |---|---|---|
-| Stream | Catchment too small / wrong tributary | Edit `output/<site_id>/pour_point_snapped.shp` in QGIS against `streams_tmp.tif`, then `rerun_site_watershed()` — reads the edited shapefile directly, skips re-snapping |
-| Lake | Catchment misses part of the lake, or grabs a neighbouring one | Edit that site's `lake_pourpoint.tif` in QGIS, then `rerun_watershed_lake()` — re-runs watershed from the edited raster without regenerating it from the polygon match |
+| Stream | Catchment too small / wrong tributary | Edit `output/<site_id>/pour_point_snapped.shp` in QGIS against `streams_tmp.tif`, then `rerun_engine_site_watershed()` (`workflow/R/engine/99_rerun_sites`) — reads the edited shapefile directly, skips re-snapping |
+| Lake | Catchment misses part of the lake, or grabs a neighbouring one | Edit that site's `lake_pourpoint.tif` in QGIS, then `rerun_engine_lake_site_watershed()` (same file) — re-runs watershed from the edited raster without regenerating it from the polygon match |
+
+## Lake bisection: prevention and correction
+
+A catchment that should flow *through* a lake can instead get cut in two by it — the D8 pointer treats the lake's flat surface as ambiguous and routes flow around rather than across, splitting what should be one contiguous catchment into disconnected pieces. Two mechanisms address this, at different points in the pipeline:
+
+- **Upfront lake conditioning (prevention, opt-in per project — `config$lake_conditioning`, `engine/prepare_lake_conditioning.R`).** Flattens known lakes into the DEM *before* D8 derivation, so every site in a group is delineated from one internally-consistent, lake-aware flow field to begin with. The lake search is scoped to a buffer around a group's own sites (not its full processing AOI) — confirmed directly on CELESTE's KEN group that the AOI is ~22x larger than the sites' own bounding box, and searching it took ~68 minutes for one group versus a small fraction of that scoped to the sites. CELESTE runs with this on; verified on 2026-08-29 that it resolved 3/3 originally-bisected KEN sites and took NIP+TUR from 31 bisected (site, lake) pairs down to 2 (both at a documented noise-band edge).
+- **Reactive detection and correction (fallback, per-project `fix_lake_bisection.R`, both CELESTE's and CAM's built on the shared, project-agnostic `workflow/R/lake_containment.R`).** For any bisection that gets through anyway (or for a project that hasn't opted into upfront conditioning), scans finished catchments against a lake source, reports the affected `(site, lake)` pairs, and re-delineates just those sites with the lake explicitly conditioned into their group's terrain. CELESTE's and CAM's versions differ only in the lake source they read (NHN per-HydroBasins-group vs. one province-wide OIH file) and in which terrain tier they're patching — both call into the same shared containment-detection logic rather than duplicating it.
+
+Prevention is the primary defense where it's wired in; the reactive fix exists because it predates upfront conditioning and because not every project has opted in.
 
 ---
 
@@ -1174,11 +1244,13 @@ reset_all()                   # everything — cache and outputs
 
 **Flow accumulation max value implausibly small.** `wbt_d8_flow_accumulation()` was passed the DEM instead of the flow pointer, or `pntr = TRUE` was omitted — verify both if calling WhiteboxTools functions directly outside the module.
 
-**NHN sheet not found for a group.** The corresponding GDB hasn't been downloaded. The workflow degrades gracefully (empty flowlines/waterbodies, `burn_streams` effectively off for that group) rather than erroring — download the sheet from GeoBase NHN and place it in `nhn_dir` if burning is actually needed there.
+**NHN sheet not found for a group.** The corresponding GDB hasn't been downloaded. The workflow degrades gracefully (empty flowlines, `burn_streams` effectively off for that group) rather than erroring — download the sheet from GeoBase NHN and place it in `nhn_dir` if burning is actually needed there.
 
 **A stream group's LOI mosaic reads as 0 everywhere instead of NA.** `build_mosaic_vrt()` always sets `-vrtnodata` for exactly this reason — without it, any area not covered by *any* input tile reads as `0`, indistinguishable from real data. This was confirmed directly: before the fix, the NBE group (no NDVI tile coverage at the time) silently produced "NDVI = 0" for every NBE catchment instead of failing the "all-NA after crop/mask" check that would have excluded it correctly.
 
 **GEOS/invalid-geometry errors from HydroBasins or waterbody sources.** `st_make_valid()` is applied inside `build_group_aoi()` (stream) and before rasterization in `rasterize_competing_classes()`. If the error persists it's likely a different geometry op — check the traceback for exactly which call raised it.
+
+**A catchment is split into disconnected pieces around a lake.** Lake bisection — see "Lake bisection: prevention and correction" above. If the project has `lake_conditioning` configured, check it's actually enabled for the affected group; otherwise run the project's `fix_lake_bisection.R` to detect and correct it reactively.
 
 ---
 
